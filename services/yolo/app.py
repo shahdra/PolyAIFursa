@@ -230,6 +230,26 @@ def get_predictions_by_label(label: str):
 
     return result
     
+@app.get("/predictions/score/{min_score}")
+def get_predictions_objects_by_min_score(min_score: float):
+    if min_score < 0.0 or min_score > 1.0:
+        raise HTTPException(status_code=400, detail="min_score must be between 0.0 and 1.0")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT do.id, do.prediction_uid, do.label, do.score, do.box
+            FROM detection_objects do
+            WHERE do.score >= ?
+        """, (min_score,)).fetchall()
+
+        result = []
+        for row in rows:
+            result.append(dict(row))
+        
+        
+    return result
+
 
 @app.get("/health")
 def health():
