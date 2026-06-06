@@ -14,6 +14,10 @@ class TestPredictionTime(unittest.TestCase):
         init_db()
         self.client = TestClient(app)
 
+    def tearDown(self):
+        if os.path.exists(app_module.DB_PATH):
+            os.remove(app_module.DB_PATH)
+
     def test_predict_includes_processing_time(self):
         with open(TEST_IMAGE, "rb") as f:
             response = self.client.post(
