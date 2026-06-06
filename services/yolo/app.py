@@ -185,6 +185,51 @@ def get_prediction_image(uid: str):
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(row[0])
 
+@app.get("/predictions/label/")
+def get_predictions_by_label_empty():
+    """
+    Handle empty label case
+    """
+    raise HTTPException(status_code=400, detail="Label cannot be empty")
+
+@app.get("/predictions/label/{label}")
+def get_predictions_by_label(label: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        #JOIN links the two tables on uid = prediction_uid
+        #WHERE do.label = 'person' removes the rows where the label is not 'label'
+        #DISTINCT collapses duplicate session rows 
+        #rows will contain unique prediction sessions that have at least one detection object with the specified label
+        rows = conn.execute("""
+            SELECT DISTINCT ps.uid, ps.timestamp
+            FROM prediction_sessions ps
+            JOIN detection_objects do ON ps.uid = do.prediction_uid
+            WHERE do.label = ?
+        """, (label,)).fetchall()
+
+        result = []
+        for row in rows:
+            # this query gets all the detection objects for a given prediction session (uid)
+            #objects will contain all detected objects for the current prediction session, including their label, score, and bounding box
+            objects = conn.execute("""
+                SELECT id, label, score, box
+                FROM detection_objects
+                WHERE prediction_uid = ?
+            """, (row["uid"],)).fetchall()
+            # we convert the sqlite3.Row objects to regular dictionaries for easier JSON serialization in the API response
+            # detection_objects will be a list of dictionaries, where each dictionary represents a detected object with its id, label, score, and bounding box
+            result_objects = []
+            for obj in objects:
+                result_objects.append(dict(obj))
+
+            result.append({
+                "uid": row["uid"],
+                "timestamp": row["timestamp"],
+                "detection_objects": result_objects
+            })
+
+    return result
+    
 
 @app.get("/health")
 def health():
