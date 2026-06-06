@@ -25,3 +25,11 @@ jobs:
       - name: Run tests
         run: pytest tests/
         working-directory: services/yolo
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: services/yolo/coverage.xml
+          fail_ci_if_error: true
+
