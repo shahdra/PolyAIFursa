@@ -2,7 +2,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("CONFIDENCE_THRESHOLD", "0.5")
+os.environ.setdefault("CONFIDENCE_THRESHOLD", "0.7")
 
 from app import app, init_db
 
@@ -26,4 +26,6 @@ def test_health(client):
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
-
+def test_confidence_threshold_value():
+    from app import CONFIDENCE_THRESHOLD
+    assert CONFIDENCE_THRESHOLD == 0.7

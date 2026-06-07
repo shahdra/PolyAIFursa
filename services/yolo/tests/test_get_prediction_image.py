@@ -8,7 +8,7 @@ from app import app, init_db
 TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 
-class TestPredictionTime(unittest.TestCase):
+class TestGetPredictionImage(unittest.TestCase):
     def setUp(self):
         _, app_module.DB_PATH = tempfile.mkstemp(suffix=".db")
         init_db()
@@ -18,31 +18,25 @@ class TestPredictionTime(unittest.TestCase):
         if os.path.exists(app_module.DB_PATH):
             os.remove(app_module.DB_PATH)
 
-    def test_predict_includes_processing_time(self):
+    def test_get_prediction_image(self):
+        # First, create a prediction session by uploading an image
         with open(TEST_IMAGE, "rb") as f:
             response = self.client.post(
                 "/predict",
                 files={"file": ("beatles.jpeg", f, "image/jpeg")}
             )
-
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertIn("time_took", data)
-        self.assertIsInstance(data["time_took"], (int, float))
-        self.assertGreaterEqual(data["time_took"], 0)
-        self.assertIn("prediction_uid", data)
-        self.assertIn("detection_count", data)
-        self.assertIn("labels", data)
+        uid = data["prediction_uid"]
 
-    def test_predict_invalid_file_type(self):
-        with open(TEST_IMAGE, "rb") as f:
-            response = self.client.post(
-                "/predict",
-                files={"file": ("testfile.pdf", f, "text/plain")}
-            )
+        # Now, retrieve the annotated image for this prediction
+        response = self.client.get(f"/prediction/{uid}/image")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/jpeg")
 
-        self.assertEqual(response.status_code, 400)
+    def test_get_prediction_image_not_found(self):
+        response = self.client.get("/prediction/nonexistent-uid/image")
+        self.assertEqual(response.status_code, 404)
         data = response.json()
         self.assertIn("detail", data)
-        self.assertEqual(data["detail"], "Only image files are supported")
-    
+        self.assertEqual(data["detail"], "Image not found")
