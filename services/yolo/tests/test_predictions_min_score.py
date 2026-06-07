@@ -6,7 +6,6 @@ import app as app_module
 from app import app, init_db
 import sqlite3
 
-TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 
 class TestPredictionByMinScore(unittest.TestCase):
@@ -30,17 +29,17 @@ class TestPredictionByMinScore(unittest.TestCase):
         we get an empty list back, confirming that the API correctly handles cases where no sessions 
         contain predictions above the specified score.
         """
-        # first upload an image to create a real session in the database
-        with open(TEST_IMAGE, "rb") as f:
-            self.client.post("/predict", files={"file": f})
-        # check the max score in the db and  use a number higher than that to ensure we get an empty result
-        with sqlite3.connect(app_module.DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT MAX(score) as max_score FROM detection_objects").fetchone()
+        # instead of calling the predict endpoint, we can directly insert a prediction session and
+        # detection objects into the database for testing the retrieval logic
+        uid = "test-uid-123"
+        original_image = "original_image_data.jpg"
+        predicted_image = "predicted_image_data.jpg"
+        app_module.save_prediction_session(uid, original_image, predicted_image)
+        app_module.save_detection_object(uid, "person", 0.95, [10, 20, 30, 40])
+        app_module.save_detection_object(uid, "car", 0.85, [50, 60, 70, 80])
 
-            max_score = row["max_score"] if row["max_score"] is not None else 0
 
-        response = self.client.get(f"/predictions/score/{max_score + 0.001}")
+        response = self.client.get(f"/predictions/score/1.0")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIsInstance(data, list)
@@ -52,25 +51,27 @@ class TestPredictionByMinScore(unittest.TestCase):
         we get a non-empty list back, confirming that the API correctly returns sessions 
         that contain predictions above the specified score.
         """
-        # first upload an image to create a real session in the database
-        with open(TEST_IMAGE, "rb") as f:
-            self.client.post("/predict", files={"file": f})
-        with sqlite3.connect(app_module.DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT MIN(score) as min_score FROM detection_objects").fetchone()
-            min_score = row["min_score"] if row["min_score"] is not None else 0
+        # instead of calling the predict endpoint, we can directly insert a prediction session and
+        # detection objects into the database for testing the retrieval logic
+        uid = "test-uid-123"        
+        original_image = "original_image_data.jpg"
+        predicted_image = "predicted_image_data.jpg"
+        app_module.save_prediction_session(uid, original_image, predicted_image)
+        app_module.save_detection_object(uid, "person", 0.95, [10, 20, 30, 40])
+        app_module.save_detection_object(uid, "car", 0.85, [50, 60, 70, 80])
+        
 
-        response = self.client.get(f"/predictions/score/{min_score}")
+        response = self.client.get(f"/predictions/score/0.9")
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIsInstance(data, list)
-        self.assertGreater(len(data), 0)
+        self.assertEqual(len(data), 1)
         for session in data:
             self.assertIn("prediction_uid", session)
             self.assertIn("id", session)
             self.assertIn("label", session)
             self.assertIn("score", session)
-            self.assertGreaterEqual(session["score"], min_score)
+            self.assertGreaterEqual(session["score"], 0.9)
             self.assertIn("box", session)
     
     def test_predictions_by_min_score_invalid(self):
