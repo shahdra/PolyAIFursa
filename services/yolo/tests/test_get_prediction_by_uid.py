@@ -5,8 +5,6 @@ from fastapi.testclient import TestClient
 import app as app_module
 from app import app, init_db
 
-TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
-
 
 class TestGetPredictionByUid(unittest.TestCase):
     def setUp(self):
@@ -19,15 +17,16 @@ class TestGetPredictionByUid(unittest.TestCase):
             os.remove(app_module.DB_PATH)
     
     def test_get_prediction_by_uid(self):
-        # First, create a prediction session by uploading an image
-        with open(TEST_IMAGE, "rb") as f:
-            response = self.client.post(
-                "/predict",
-                files={"file": ("beatles.jpeg", f, "image/jpeg")}
-            )
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        uid = data["prediction_uid"]
+
+        # instead of calling the predict endpoint, we can directly insert a prediction session and
+        # detection objects into the database for testing the retrieval logic
+        uid = "test-uid-123"
+        original_image = "original_image_data"
+        predicted_image = "predicted_image_data"
+        app_module.save_prediction_session(uid, original_image, predicted_image)
+        app_module.save_detection_object(uid, "person", 0.95, [10, 20, 30, 40])
+        app_module.save_detection_object(uid, "car", 0.85, [50, 60, 70, 80])    
+
 
         # Now, retrieve the prediction session by uid
         response = self.client.get(f"/prediction/{uid}")

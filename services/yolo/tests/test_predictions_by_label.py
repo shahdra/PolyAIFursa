@@ -6,8 +6,6 @@ import app as app_module
 from app import app, init_db
 import sqlite3
 
-TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
-
 
 class TestPredictionByLabel(unittest.TestCase):
 
@@ -37,18 +35,16 @@ class TestPredictionByLabel(unittest.TestCase):
         This test checks that when we search for a label that exists in the database, 
         we get back a list of prediction sessions that contain that label.
         """
-        # first upload an image to create a real session in the database
-        with open(TEST_IMAGE, "rb") as f:
-            self.client.post("/predict", files={"file": f})
+        # instead of calling the predict endpoint, we can directly insert a prediction session and
+        # detection objects into the database for testing the retrieval logic
+        uid = "test-uid-123"
+        original_image = "original_image_data.jpg"
+        predicted_image = "predicted_image_data.jpg"
+        app_module.save_prediction_session(uid, original_image, predicted_image)
+        app_module.save_detection_object(uid, "person", 0.95, [10, 20, 30, 40])
+        app_module.save_detection_object(uid, "car", 0.85, [50, 60, 70, 80])
 
-        # now search for a label - we don't know exactly which labels YOLO detected
-        # so we get all sessions and pick a real label from the database
-        with sqlite3.connect(app_module.DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT label FROM detection_objects LIMIT 1").fetchone()
-        
-        label = row["label"]
-        response = self.client.get(f"/predictions/label/{label}")
+        response = self.client.get(f"/predictions/label/person")
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -59,16 +55,16 @@ class TestPredictionByLabel(unittest.TestCase):
         """
         Test that the response structure is correct for each session.
         """
-        # upload an image to populate the database
-        with open(TEST_IMAGE, "rb") as f:
-            self.client.post("/predict", files={"file": f})
+        # instead of calling the predict endpoint, we can directly insert a prediction session and
+        # detection objects into the database for testing the retrieval logic
+        uid = "test-uid-123"
+        original_image = "original_image_data.jpg"
+        predicted_image = "predicted_image_data.jpg"
+        app_module.save_prediction_session(uid, original_image, predicted_image)
+        app_module.save_detection_object(uid, "person", 0.95, [10, 20, 30, 40])
+        app_module.save_detection_object(uid, "car", 0.85, [50, 60, 70, 80])
 
-        with sqlite3.connect(app_module.DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT label FROM detection_objects LIMIT 1").fetchone()
-
-        label = row[0]
-        response = self.client.get(f"/predictions/label/{label}")
+        response = self.client.get(f"/predictions/label/person")
         data = response.json()
 
         for session in data:
@@ -87,9 +83,14 @@ class TestPredictionByLabel(unittest.TestCase):
         This test checks that if we search for a label that doesn't exist in the database,
         we get an empty list back, confirming that only sessions with the specified label are returned.
         """
-        # upload an image to create a session
-        with open(TEST_IMAGE, "rb") as f:
-            self.client.post("/predict", files={"file": f})
+        # instead of calling the predict endpoint, we can directly insert a prediction session and
+        # detection objects into the database for testing the retrieval logic
+        uid = "test-uid-123"
+        original_image = "original_image_data.jpg"
+        predicted_image = "predicted_image_data.jpg"
+        app_module.save_prediction_session(uid, original_image, predicted_image)
+        app_module.save_detection_object(uid, "person", 0.95, [10, 20, 30, 40])
+        app_module.save_detection_object(uid, "car", 0.85, [50, 60, 70, 80])
 
         # search for a label that definitely doesn't exist
         response = self.client.get("/predictions/label/unicorn")
