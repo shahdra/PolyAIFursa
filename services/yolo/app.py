@@ -32,11 +32,10 @@ else:
     CONFIDENCE_THRESHOLD = 0.5
     logging.info(f"CONFIDENCE_THRESHOLD not set, using default: {CONFIDENCE_THRESHOLD}")
 
-UPLOAD_DIR = "uploads/original"
-PREDICTED_DIR = "uploads/predicted"
-DB_PATH = "predictions.db"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+UPLOAD_DIR = "uploads/original" # Directory to save original uploaded images
+PREDICTED_DIR = "uploads/predicted" # Directory to save predicted images with bounding boxes drawn on them
+DB_PATH = "predictions.db" # Path to the SQLite database file
+os.makedirs(UPLOAD_DIR, exist_ok=True) # Create the upload directories if they don't exist   
 os.makedirs(PREDICTED_DIR, exist_ok=True)
 
 # Download the AI model (tiny model ~6MB)
@@ -72,7 +71,7 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_label ON detection_objects (label)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_score ON detection_objects (score)")
 
-
+# saves the prediction session to the database, including the unique identifier (uid), the file paths of the original and predicted images, and a timestamp (automatically set to the current time).
 def save_prediction_session(uid, original_image, predicted_image):
     """
     Save prediction session to database
@@ -82,7 +81,7 @@ def save_prediction_session(uid, original_image, predicted_image):
             INSERT INTO prediction_sessions (uid, original_image, predicted_image)
             VALUES (?, ?, ?)
         """, (uid, original_image, predicted_image))
-
+# saves each detected object to the database, including the unique identifier of the prediction session it belongs to (prediction_uid), the label of the detected object, the confidence score, and the bounding box coordinates (stored as a string).
 def save_detection_object(prediction_uid, label, score, box):
     """
     Save detection object to database
@@ -95,44 +94,52 @@ def save_detection_object(prediction_uid, label, score, box):
 
 @app.post("/predict")
 def predict(file: UploadFile = File(...)):
+    # Record the start time of the prediction process to calculate how long it takes to process the image and return the results.
     start_time = time.time()
     """
     Predict objects in an image
     """
     ext = os.path.splitext(file.filename)[1]
-
+    #for debugging purposes
     logging.info(f"Received file: {file.filename} with extension: {ext}")
 
     if ext.lower() not in [".jpg", ".jpeg", ".png"]:
         raise HTTPException(status_code=400, detail="Only image files are supported")
     
-    uid = str(uuid.uuid4())
-    original_path = os.path.join(UPLOAD_DIR, uid + ext)
+    uid = str(uuid.uuid4())# Generate a unique identifier for this prediction session
+    original_path = os.path.join(UPLOAD_DIR, uid + ext) #create unique file paths for the original and predicted images using the generated uid and the original file extension
     predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
 
     with open(original_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+        shutil.copyfileobj(file.file, f) # Save the uploaded file to disk at the originsl_path we just created.
 
+    # Run the YOLO model on the saved image with the specified confidence threshold
     results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
-
-    annotated_frame = results[0].plot()  # NumPy image with boxes
+    # results is a list of results for each image (we only have one image, so we take the first result)
+    annotated_frame = results[0].plot()  # results[0].plot() returns a NumPy array with the bounding boxes drawn on the original image
+    # We convert the annotated frame to a PIL Image and save it to disk
+    #Image.fromarray() converts the numpy array to image with bounding boxes 
     annotated_image = Image.fromarray(annotated_frame)
+    # We save the annotated image to the predicted path on disk
     annotated_image.save(predicted_path)
 
+    # We save the prediction session to the database, including the uid of the session, original image path, and predicted image path
     save_prediction_session(uid, original_path, predicted_path)
     
+    # We loop through the detected boxes in the results and save each detected object to the database with its label,
+    # confidence score, and bounding box coordinates. We also collect the labels of the detected objects in a list to include in the API response.
     detected_labels = []
     for box in results[0].boxes:
-        label_idx = int(box.cls[0].item())
+        label_idx = int(box.cls[0].item()) # box.cls[0] gives us the class index of the detected object, which we convert to an integer and use to look up the corresponding label from the model's names list (model.names).
         label = model.names[label_idx]
         score = float(box.conf[0])
-        bbox = box.xyxy[0].tolist()
+        bbox = box.xyxy[0].tolist() # box.xyxy[0] gives us the bounding box coordinates in the format [x_min, y_min, x_max, y_max], which we convert to a list for easier storage in the database.
         save_detection_object(uid, label, score, bbox)
         detected_labels.append(label)
 
     processing_time = round(time.time() - start_time, 2)
     return {
-        "prediction_uid": uid, 
+        "prediction_uid": uid, # uid of the current predition session
         "detection_count": len(results[0].boxes),
         "labels": detected_labels,
         "time_took": processing_time
@@ -144,13 +151,13 @@ def get_prediction_by_uid(uid: str):
     Get prediction session by uid with all detected objects
     """
     with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        # Get prediction session
+        conn.row_factory = sqlite3.Row # This allows us to access the columns of the result rows by name (e.g., row["uid"] instead of row[0])
+        # Get prediction session details for the given uid from the prediction_sessions table. fetchone() returns a single row that matches the query, or None if no matching row is found.
         session = conn.execute("SELECT * FROM prediction_sessions WHERE uid = ?", (uid,)).fetchone()
         if not session:
             raise HTTPException(status_code=404, detail="Prediction not found")
             
-        # Get all detection objects for this prediction
+        # Get all detection objects for this prediction. fetchall() returns a list of all rows that match the query, which in this case will be all detected objects associated with the given prediction uid.
         objects = conn.execute(
             "SELECT * FROM detection_objects WHERE prediction_uid = ?", 
             (uid,)
@@ -178,6 +185,7 @@ def get_prediction_image(uid: str):
     Return the annotated (bounding-box) image for a prediction
     """
     with sqlite3.connect(DB_PATH) as conn:
+        # row will contain the predicted_image path for the given uid, or None if no matching row is found
         row = conn.execute(
             "SELECT predicted_image FROM prediction_sessions WHERE uid = ?", (uid,)
         ).fetchone()
@@ -194,12 +202,18 @@ def get_predictions_by_label_empty():
 
 @app.get("/predictions/label/{label}")
 def get_predictions_by_label(label: str):
+    """
+    Get prediction sessions that have at least one detected object with the specified label"""
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        #JOIN links the two tables on uid = prediction_uid
-        #WHERE do.label = 'person' removes the rows where the label is not 'label'
-        #DISTINCT collapses duplicate session rows 
-        #rows will contain unique prediction sessions that have at least one detection object with the specified label
+
+        #Start from the prediction_sessions table
+        #JOIN detection_objects do ON ps.uid = do.prediction_uid 
+        #This is an INNER JOIN — it links each session row to its detected objects by matching the session's uid with the detection object's prediction_uid.
+        #WHERE do.label = ?
+        #Filters rows to only those where the detected label matches what was passed in the URL. This ensures we only get sessions that have at least one detected object with the specified label.
+        #SELECT DISTINCT ps.uid, ps.timestamp
+        #We select the unique session uids and their timestamps. DISTINCT ensures that if a session has multiple detected objects with the same label, it will only appear once in the results.
         rows = conn.execute("""
             SELECT DISTINCT ps.uid, ps.timestamp
             FROM prediction_sessions ps
@@ -210,7 +224,7 @@ def get_predictions_by_label(label: str):
         result = []
         for row in rows:
             # this query gets all the detection objects for a given prediction session (uid)
-            #objects will contain all detected objects for the current prediction session, including their label, score, and bounding box
+            # objects will contain all detected objects for the current prediction session, including their label, score, and bounding box
             objects = conn.execute("""
                 SELECT id, label, score, box
                 FROM detection_objects
@@ -232,6 +246,8 @@ def get_predictions_by_label(label: str):
     
 @app.get("/predictions/score/{min_score}")
 def get_predictions_objects_by_min_score(min_score: float):
+    """
+    Get detected objects with a confidence score above the specified threshold"""
     if min_score < 0.0 or min_score > 1.0:
         raise HTTPException(status_code=400, detail="min_score must be between 0.0 and 1.0")
 
