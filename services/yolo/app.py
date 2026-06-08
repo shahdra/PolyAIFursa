@@ -106,17 +106,21 @@ def predict(file: UploadFile = File(...)):
     if ext.lower() not in [".jpg", ".jpeg", ".png"]:
         raise HTTPException(status_code=400, detail="Only image files are supported")
     
-    uid = str(uuid.uuid4())
-    original_path = os.path.join(UPLOAD_DIR, uid + ext)
+    uid = str(uuid.uuid4())# Generate a unique identifier for this prediction session
+    original_path = os.path.join(UPLOAD_DIR, uid + ext) #create unique file paths for the original and predicted images using the generated uid and the original file extension
     predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
 
-    with open(original_path, "wb") as f:
+    with open(original_path, "wb") as f:# Save the uploaded file to disk
         shutil.copyfileobj(file.file, f)
 
+    # Run the YOLO model on the saved image with the specified confidence threshold
     results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
-
-    annotated_frame = results[0].plot()  # NumPy image with boxes
+    # results is a list of results for each image (we only have one image, so we take the first result)
+    annotated_frame = results[0].plot()  # results[0].plot() returns a NumPy array with the bounding boxes drawn on the original image
+    # We convert the annotated frame to a PIL Image and save it to disk
+    #Image.fromarray() converts the numpy array to image with bounding boxes 
     annotated_image = Image.fromarray(annotated_frame)
+    # We save the annotated image to the predicted path on disk
     annotated_image.save(predicted_path)
 
     save_prediction_session(uid, original_path, predicted_path)
