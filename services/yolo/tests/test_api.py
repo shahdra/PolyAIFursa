@@ -1,4 +1,5 @@
 import os
+import signal
 import pytest
 from fastapi.testclient import TestClient
 
@@ -32,3 +33,14 @@ def test_health(client):
 def test_confidence_threshold_value():
     from app import CONFIDENCE_THRESHOLD
     assert CONFIDENCE_THRESHOLD == 0.7
+
+def test_handle_sigterm_sets_shutdown_flag():
+    import app as app_module
+    app_module.is_shutting_down = False  # reset the actual module variable
+
+    from app import handle_sigterm
+    with pytest.raises(SystemExit) as exc_info:
+        handle_sigterm(signal.SIGTERM, None)
+
+    assert app_module.is_shutting_down is True   # ✅ checks the right variable
+    assert exc_info.value.code == 0
