@@ -193,17 +193,19 @@ def get_prediction_image(uid: str):
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(row[0])
 
-@app.get("/predictions/label/")
-def get_predictions_by_label_empty():
-    """
-    Handle empty label case
-    """
-    raise HTTPException(status_code=400, detail="Label cannot be empty")
-
 @app.get("/predictions/label/{label}")
 def get_predictions_by_label(label: str):
     """
-    Get prediction sessions that have at least one detected object with the specified label"""
+    Get prediction sessions that have at least one detected object with the specified label
+    """
+    # If label is an empty string
+    if not label.strip(): # strip() removes any leading or trailing whitespace from the label string, and if the resulting string is empty, we raise an HTTPException with a 400 status code and a message indicating that the label cannot be empty. This prevents the API from processing requests with invalid or empty labels, which could lead to unexpected behavior or errors in the database queries.
+        raise HTTPException(status_code=400, detail="Label cannot be empty") 
+
+    valid_labels = set(model.names.values()) # We create a set of valid labels from the model's names to efficiently check if the provided label exists in the model's known classes. If the label is not in this set, we raise an HTTPException with a 400 status code and a message indicating that the label is invalid. This ensures that the API only processes requests for labels that the model can actually detect, preventing unnecessary database queries and potential confusion for users.   
+    if label not in valid_labels:
+        raise HTTPException(status_code=400, detail=f"Invalid label. Valid labels are: {', '.join(valid_labels)}")
+    
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
 
