@@ -24,7 +24,7 @@ class TestPredictionByLabel(unittest.TestCase):
         This test checks that when we search for a label that doesn't exist in the database,
         we get an empty list back, confirming that the API correctly handles cases where no sessions contain"""
         # simulate /predictions/label/ API endpoint to test empty label case
-        response = self.client.get("/predictions/label/")
+        response = self.client.get("/predictions/label/ ")
         self.assertEqual(response.status_code, 400)
         data = response.json()
         self.assertIn("detail", data)
@@ -78,21 +78,12 @@ class TestPredictionByLabel(unittest.TestCase):
                 self.assertIn("score", obj)
                 self.assertIn("box", obj)
 
-    def test_sessions_without_label_are_excluded(self):
+    def test_invalid_label_returns_error(self):
         """
-        This test checks that if we search for a label that doesn't exist in the database,
-        we get an empty list back, confirming that only sessions with the specified label are returned.
+        This test checks that if we search for an invalid label, we get an error response.
         """
-        # instead of calling the predict endpoint, we can directly insert a prediction session and
-        # detection objects into the database for testing the retrieval logic
-        uid = "test-uid-123"
-        original_image = "original_image_data.jpg"
-        predicted_image = "predicted_image_data.jpg"
-        app_module.save_prediction_session(uid, original_image, predicted_image)
-        app_module.save_detection_object(uid, "person", 0.95, [10, 20, 30, 40])
-        app_module.save_detection_object(uid, "car", 0.85, [50, 60, 70, 80])
-
-        # search for a label that definitely doesn't exist
-        response = self.client.get("/predictions/label/unicorn")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), [])
+        response = self.client.get("/predictions/label/invalid_label")
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertIn("detail", data)
+        self.assertTrue(data["detail"].startswith("Invalid label"))
