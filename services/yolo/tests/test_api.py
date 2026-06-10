@@ -9,6 +9,7 @@ os.environ.setdefault("CONFIDENCE_THRESHOLD", "0.7")
 
 from app import app, init_db
 
+# creat a test image path and saving it in a variable to use in tests, the image file should be located at services/yolo/tests/data/beatles.jpeg
 TEST_IMAGE = os.path.join(os.path.dirname(__file__), "data", "beatles.jpeg")
 
 
@@ -22,6 +23,7 @@ def setup_db(tmp_path, monkeypatch): # Use a temporary database file for testing
 
 @pytest.fixture
 def client():
+    # create a test client for the FastAPI app
     return TestClient(app)
 
 

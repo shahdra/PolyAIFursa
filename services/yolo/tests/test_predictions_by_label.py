@@ -48,8 +48,8 @@ class TestPredictionByLabel(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertIsInstance(data, list)
-        self.assertGreater(len(data), 0)
+        self.assertIsInstance(data, list) # We expect a list of sessions in the response
+        self.assertGreater(len(data), 0) # We expect at least one session to be returned since we inserted one with the "person" label
 
     def test_response_structure(self):
         """

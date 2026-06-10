@@ -8,7 +8,9 @@ from app import app, init_db
 
 class TestGetPredictionByUid(unittest.TestCase):
     def setUp(self):
-        _, app_module.DB_PATH = tempfile.mkstemp(suffix=".db")
+        
+        # Create a temporary database file for testing and initialize it
+        _, app_module.DB_PATH = tempfile.mkstemp(suffix=".db") 
         init_db()
         self.client = TestClient(app)
 
@@ -31,13 +33,17 @@ class TestGetPredictionByUid(unittest.TestCase):
         # Now, retrieve the prediction session by uid
         response = self.client.get(f"/prediction/{uid}")
         self.assertEqual(response.status_code, 200)
-        prediction_data = response.json()
+        prediction_data = response.json() 
         
-        self.assertEqual(prediction_data["uid"], uid)
-        self.assertIn("timestamp", prediction_data)
+        # Validate the structure and content of the response
+        self.assertEqual(prediction_data["uid"], uid) 
+        self.assertIn("timestamp", prediction_data) 
         self.assertIn("original_image", prediction_data)
         self.assertIn("predicted_image", prediction_data)
-        self.assertIn("detection_objects", prediction_data)
+
+        # Check that the detection objects are present and have the expected structure
+        # in save_detection_object, we creat detection_objects list and save objects with details on it
+        self.assertIn("detection_objects", prediction_data) 
         for obj in prediction_data["detection_objects"]:
             self.assertIn("id", obj)
             self.assertIn("label", obj)
