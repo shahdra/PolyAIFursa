@@ -20,19 +20,21 @@ class TestGetPredictionImage(unittest.TestCase):
 
         # instead of calling the predict endpoint, we can directly insert a prediction session and
         # detection objects into the database for testing the retrieval logic
-        uid = "test-uid-123"
+        uid = "test-uid-123" # unique identifier for the prediction session we are creating for this test
         original_image = "original_image_data.jpg"
-        # Create a fake predicted image file
+
+        # predicted_image_full_path is the full path to the fake predicted image file that we create for testing.
+        # "predicted_image.jpeg" is the name of the fake predicted image file
         predicted_image_full_path = os.path.join(tempfile.gettempdir(), "predicted_image.jpeg")
-        with open(predicted_image_full_path, "wb") as f:
-            f.write(b"fake image data")
+        with open(predicted_image_full_path, "wb") as f: # We open the file in binary write mode to write fake image data to it
+            f.write(b"fake image data")  # "fake image data" is just a placeholder byte string to simulate the content of an image file
 
         app_module.save_prediction_session(uid, original_image, predicted_image_full_path)
 
         # Now, retrieve the annotated image for this prediction
         response = self.client.get(f"/prediction/{uid}/image")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers["content-type"], "image/jpeg")
+        self.assertEqual(response.headers["content-type"], "image/jpeg") 
         self.assertEqual(response.content, b"fake image data")
         
 
