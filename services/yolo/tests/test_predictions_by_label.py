@@ -18,7 +18,10 @@ class TestPredictionByLabel(unittest.TestCase):
         # Initialize the TestClient with the FastAPI app to simulate API requests in tests
         self.client = TestClient(app)
                 
-    
+    def tearDown(self):
+        if os.path.exists(app_module.DB_PATH):
+            os.remove(app_module.DB_PATH)
+            
     def test_predictions_by_label_empty(self):
         """
         This test checks that when we search for a label that doesn't exist in the database,
