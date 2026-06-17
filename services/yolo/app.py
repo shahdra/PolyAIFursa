@@ -297,7 +297,8 @@ def health():
     """
     Health check endpoint
     """
-    return {"status": "ok from dev"}
+    #added comment 
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     import uvicorn
