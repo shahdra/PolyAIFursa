@@ -297,7 +297,7 @@ def health():
     """
     Health check endpoint
     """
-    #added comment for test deployment 
+    #added comment for test deployment :)
     return {"status": "ok"}
 
 if __name__ == "__main__":
