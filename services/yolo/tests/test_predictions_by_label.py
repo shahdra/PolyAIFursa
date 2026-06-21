@@ -81,6 +81,27 @@ class TestPredictionByLabel(unittest.TestCase):
                 self.assertIn("score", obj)
                 self.assertIn("box", obj)
 
+    def test_matching_session_includes_all_detected_objects(self):
+        """
+        The endpoint should return the full prediction session for a matching label,
+        not just the matching objects.
+        """
+        uid = "test-uid-456"
+        app_module.save_prediction_session(uid, "orig.jpg", "pred.jpg")
+        app_module.save_detection_object(uid, "person", 0.99, [1, 2, 3, 4])
+        app_module.save_detection_object(uid, "car", 0.88, [5, 6, 7, 8])
+
+        response = self.client.get("/predictions/label/person")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["uid"], uid)
+        self.assertEqual(
+            [obj["label"] for obj in data[0]["detection_objects"]],
+            ["person", "car"]
+        )
+
     def test_invalid_label_returns_error(self):
         """
         This test checks that if we search for an invalid label, we get an error response.
