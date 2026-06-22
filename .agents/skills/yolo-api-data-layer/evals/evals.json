@@ -1,0 +1,58 @@
+{
+  "evals": [
+    {
+      "id": "sqlalchemy-refactor",
+      "prompt": "Refactor the API to use SQLAlchemy instead of raw sqlite3 calls.",
+      "expected_output": [
+        "Replace direct database connection logic with SQLAlchemy models and session handling.",
+        "Keep the HTTP endpoints focused on request/response concerns.",
+        "Use explicit schema setup and transaction patterns."
+      ]
+    },
+    {
+      "id": "recent-predictions-endpoint",
+      "prompt": "Add an endpoint GET /predictions/recent that returns the 10 most recent prediction sessions.",
+      "expected_output": [
+        "Add a route that sorts sessions by timestamp in descending order.",
+        "Limit the result to 10 records.",
+        "Return a response shape consistent with the other prediction endpoints."
+      ]
+    },
+    {
+      "id": "user-feedback-table",
+      "prompt": "Add a UserFeedback table so each prediction can store user ratings.",
+      "expected_output": [
+        "Create a feedback model tied to the prediction session.",
+        "Make the relationship between prediction sessions and feedback explicit.",
+        "Support storing rating data in a predictable schema."
+      ]
+    },
+    {
+      "id": "delete-session-with-objects",
+      "prompt": "Delete a prediction session and all its detection objects by uid.",
+      "expected_output": [
+        "Implement deletion logic that removes the session and related detections.",
+        "Use cascade behavior or explicit cleanup logic.",
+        "Return a clear success or not-found response."
+      ]
+    },
+    {
+      "id": "processing-time-column",
+      "prompt": "Add a processing_time_ms column to the prediction_sessions table and return it in responses.",
+      "expected_output": [
+        "Update the schema/model to include processing_time_ms.",
+        "Persist the value when saving a prediction session.",
+        "Include the field in API responses where appropriate."
+      ]
+    },
+    {
+      "id": "configurable-database-backend",
+      "prompt": "Make the database backend configurable so the service can use Postgres in production.",
+      "expected_output": [
+        "Use environment-based configuration such as DATABASE_URL.",
+        "Support switching between SQLite for development and Postgres for production.",
+        "Avoid hardcoding the backend choice in the application logic."
+      ]
+    }
+  ]
+}
