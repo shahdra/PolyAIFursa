@@ -31,8 +31,8 @@ MODEL = os.environ.get("MODEL")
 ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
+    "google_genai:gemini-2.5-flash",
 }
-
 if MODEL not in ALLOWED_MODELS:
     allowed_list = "\n  ".join(sorted(ALLOWED_MODELS))
     raise SystemExit(
@@ -85,9 +85,15 @@ def run_agent(history: list) -> str:
         response: AIMessage = llm_with_tools.invoke(messages)
         messages.append(response)
 
-        # No tool calls, the model produced its final answer
+         # No tool calls, the model produced its final answer
         if not response.tool_calls:
-            return response.content
+            content = response.content
+            if isinstance(content, list):
+                content = "".join(
+                    block.get("text", "") for block in content
+                    if isinstance(block, dict)
+                )
+            return content
 
         # Execute every tool the model requested
         for tool_call in response.tool_calls:
