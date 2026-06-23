@@ -1,8 +1,8 @@
-import type { ChatMessage } from "./types";
+import type { ChatMessage, ChatResponse } from "./types";
 
 const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL ?? "http://localhost:8000";
 
-export async function sendMessage(messages: ChatMessage[]): Promise<string> {
+export async function sendMessage(messages: ChatMessage[]): Promise<ChatResponse> {
   const res = await fetch(`${AGENT_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -13,5 +13,5 @@ export async function sendMessage(messages: ChatMessage[]): Promise<string> {
     throw new Error(text || res.statusText);
   }
   const data = await res.json();
-  return data.response as string;
+  return data as ChatResponse;
 }
