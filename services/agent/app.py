@@ -104,9 +104,13 @@ def run_agent(history: list) -> str:
 
 app = FastAPI(title="Vision Agent")
 
+ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS", "http://localhost:3000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://3.225.53.28:3000"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["POST", "GET"],
     allow_headers=["Content-Type"],
 )
