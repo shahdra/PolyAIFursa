@@ -21,9 +21,25 @@ jobs:
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B dev origin/dev
-            cd services/yolo
+
+            # --- yolo ---
+            cd ~/PolyAIFursa/services/yolo
             .venv/bin/pip install -r requirements.txt
             sudo systemctl restart yolo.service
+
+            # --- agent ---
+            cd ~/PolyAIFursa/services/agent
+            .venv/bin/pip install -r requirements.txt
+            sudo systemctl restart agent.service
+
+            # --- frontend ---
+            cd ~/PolyAIFursa/services/frontend
+            npm install
+            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:8000 npm run build
+            sudo systemctl restart frontend.service
+
+
+            
 
   deploy-prod:
     if: github.ref == 'refs/heads/main'
@@ -39,6 +55,19 @@ jobs:
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B main origin/main
-            cd services/yolo
+
+            # --- yolo ---
+            cd ~/PolyAIFursa/services/yolo
             .venv/bin/pip install -r requirements.txt
             sudo systemctl restart yolo.service
+
+            # --- agent ---
+            cd ~/PolyAIFursa/services/agent
+            .venv/bin/pip install -r requirements.txt
+            sudo systemctl restart agent.service
+
+            # --- frontend ---
+            cd ~/PolyAIFursa/services/frontend
+            npm install
+            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.PROD_INSTANCE_IP }}:8000 npm run build
+            sudo systemctl restart frontend.service
