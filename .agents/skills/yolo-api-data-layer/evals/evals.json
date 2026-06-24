@@ -1,57 +1,79 @@
 {
+  "skill_name": "yolo-api-data-layer",
   "evals": [
     {
-      "id": "sqlalchemy-refactor",
+      "id": 1,
       "prompt": "Refactor the API to use SQLAlchemy instead of raw sqlite3 calls.",
-      "expected_output": [
-        "Replace direct database connection logic with SQLAlchemy models and session handling.",
-        "Keep the HTTP endpoints focused on request/response concerns.",
-        "Use explicit schema setup and transaction patterns."
+      "expected_output": "The YOLO service's persistence is fully migrated to SQLAlchemy models and sessions, with every endpoint and write helper going through the ORM and no raw sqlite3 usage left, while all existing endpoints keep the same status codes and response shapes.",
+      "assertions": [
+        "services/yolo/app.py contains no 'import sqlite3'",
+        "No file under services/yolo/ calls sqlite3.connect()",
+        "No raw SQL strings (e.g. 'SELECT', 'INSERT INTO', 'CREATE TABLE') remain in services/yolo/app.py",
+        "services/yolo/database.py defines PredictionSession and DetectionObject as SQLAlchemy declarative models",
+        "Database access goes through a session obtained from a session factory (e.g. SessionLocal / get_db), not a manual connection",
+        "All existing tests in services/yolo/tests/ still pass after the change",
+        "The response keys for existing endpoints (uid, timestamp, original_image, predicted_image, detection_objects) are unchanged"
       ]
     },
     {
-      "id": "recent-predictions-endpoint",
+      "id": 2,
       "prompt": "Add an endpoint GET /predictions/recent that returns the 10 most recent prediction sessions.",
-      "expected_output": [
-        "Add a route that sorts sessions by timestamp in descending order.",
-        "Limit the result to 10 records.",
-        "Return a response shape consistent with the other prediction endpoints."
+      "expected_output": "A new GET /predictions/recent route that queries prediction sessions ordered by timestamp descending, limited to 10 results, returning the same session shape as the other prediction endpoints.",
+      "assertions": [
+        "A route handler for GET /predictions/recent exists in services/yolo/app.py",
+        "The query orders prediction sessions by timestamp in descending order",
+        "The query limits the result to at most 10 rows",
+        "The response shape matches the existing session shape (uid, timestamp, detection_objects)",
+        "The query uses SQLAlchemy (no raw SQL string), consistent with the rest of the data layer"
       ]
     },
     {
-      "id": "user-feedback-table",
+      "id": 3,
       "prompt": "Add a UserFeedback table so each prediction can store user ratings.",
-      "expected_output": [
-        "Create a feedback model tied to the prediction session.",
-        "Make the relationship between prediction sessions and feedback explicit.",
-        "Support storing rating data in a predictable schema."
+      "expected_output": "A UserFeedback SQLAlchemy model linked to PredictionSession by a foreign key, storing a rating and an optional comment, with the relationship declared on both sides.",
+      "assertions": [
+        "A UserFeedback model is defined in services/yolo/database.py",
+        "UserFeedback has a foreign key referencing PredictionSession.uid",
+        "UserFeedback stores a rating field and an optional comment field",
+        "The relationship between PredictionSession and UserFeedback is declared with SQLAlchemy relationship()",
+        "The model is defined declaratively, not created via a raw CREATE TABLE string"
       ]
     },
     {
-      "id": "delete-session-with-objects",
+      "id": 4,
       "prompt": "Delete a prediction session and all its detection objects by uid.",
-      "expected_output": [
-        "Implement deletion logic that removes the session and related detections.",
-        "Use cascade behavior or explicit cleanup logic.",
-        "Return a clear success or not-found response."
+      "expected_output": "A delete route that removes the prediction session for a given uid along with all its related detection objects, returning a clear success response or a 404 when the uid does not exist.",
+      "assertions": [
+        "A delete route keyed on uid exists in services/yolo/app.py",
+        "Deleting a session also removes its related DetectionObject rows (via cascade or explicit deletion)",
+        "Deleting a non-existent uid returns a 404 with a clear detail message",
+        "A successful delete returns a clear success response",
+        "The deletion is performed through SQLAlchemy, not a raw SQL DELETE string"
       ]
     },
     {
-      "id": "processing-time-column",
+      "id": 5,
       "prompt": "Add a processing_time_ms column to the prediction_sessions table and return it in responses.",
-      "expected_output": [
-        "Update the schema/model to include processing_time_ms.",
-        "Persist the value when saving a prediction session.",
-        "Include the field in API responses where appropriate."
+      "expected_output": "A processing_time_ms column added to the PredictionSession model, persisted when a session is saved, and included in the JSON responses of the relevant prediction endpoints.",
+      "assertions": [
+        "PredictionSession in services/yolo/database.py includes a processing_time_ms column",
+        "The value is persisted when a prediction session is saved",
+        "processing_time_ms appears in the JSON response of the relevant prediction endpoint(s)",
+        "The column is added to the model declaratively, not via a raw ALTER/CREATE TABLE string",
+        "Existing response keys are preserved (the new field is added, nothing is removed)"
       ]
     },
     {
-      "id": "configurable-database-backend",
+      "id": 6,
       "prompt": "Make the database backend configurable so the service can use Postgres in production.",
-      "expected_output": [
-        "Use environment-based configuration such as DATABASE_URL.",
-        "Support switching between SQLite for development and Postgres for production.",
-        "Avoid hardcoding the backend choice in the application logic."
+      "expected_output": "The service selects its database backend from environment variables (defaulting to SQLite for local dev and switching to Postgres in production) with no hardcoded backend choice in the application logic.",
+      "assertions": [
+        "The backend is chosen from an environment variable (e.g. DB_BACKEND or DATABASE_URL), not hardcoded",
+        "The default configuration uses SQLite so local dev works with no setup",
+        "Setting the env var to postgres produces a PostgreSQL connection URL",
+        "Postgres credentials/host/db are read from environment variables, not literals",
+        "The same application/model code runs unchanged against both backends",
+        "The required environment variables are documented (in the skill or a README/.env example)"
       ]
     }
   ]

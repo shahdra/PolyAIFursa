@@ -4,8 +4,6 @@ import tempfile
 from fastapi.testclient import TestClient
 import app as app_module
 from app import app, init_db
-import sqlite3
-
 
 
 class TestPredictionByMinScore(unittest.TestCase):
