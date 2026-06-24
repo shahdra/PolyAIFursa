@@ -49,7 +49,6 @@ SYSTEM_PROMPT = (
 # Per-request context: the uploaded image, the last YOLO prediction uid, and
 # which tools were called. These flow AROUND the LLM (the model never sees image data).
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
-_last_prediction_uid: ContextVar[Optional[str]] = ContextVar("last_prediction_uid", default=None)
 _tools_called: ContextVar[list] = ContextVar("tools_called", default=[])
 
 
@@ -69,11 +68,6 @@ def detect_objects() -> str:
         response.raise_for_status()
     result = response.json()
 
-    # Stash the prediction uid so /chat can fetch the annotated image afterwards.
-    uid = result.get("prediction_uid")
-    if uid:
-        _last_prediction_uid.set(uid)
-
     return json.dumps(result)
 
 
@@ -90,6 +84,7 @@ class AgentResult(BaseModel):
     text: str
     iterations: int
     tools_called: list[str]
+    prediction_uid: Optional[str] = None
     context_limit_exceeded: bool = False
 
 
@@ -103,6 +98,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
     """
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
     tools_called: list[str] = []
+    prediction_uid: Optional[str] = None
 
     for i in range(1, max_iterations + 1):
         response: AIMessage = llm_with_tools.invoke(messages)
@@ -120,6 +116,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
                 text=content,
                 iterations=i,
                 tools_called=tools_called,
+                prediction_uid=prediction_uid,
             )
 
         # Execute every tool the model requested
@@ -129,11 +126,20 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
             tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
             messages.append(tool_result)
 
+            # Capture the YOLO prediction uid from the tool's JSON result
+            try:
+                parsed = json.loads(tool_result.content)
+                if isinstance(parsed, dict) and parsed.get("prediction_uid"):
+                    prediction_uid = parsed["prediction_uid"]
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
     # Hit the iteration cap without a final answer
     return AgentResult(
         text="I couldn't complete the request within the allowed number of steps.",
         iterations=max_iterations,
         tools_called=tools_called,
+        prediction_uid=prediction_uid,
         context_limit_exceeded=True,
     )
 
@@ -201,13 +207,12 @@ def chat(request: ChatRequest):
             lc_messages.append(AIMessage(content=msg.content))
 
     image_token = _current_image_b64.set(latest_image)
-    uid_token = _last_prediction_uid.set(None)
     try:
         start = time.time()
         result = run_agent(lc_messages)
         elapsed = round(time.time() - start, 2)
 
-        uid = _last_prediction_uid.get()
+        uid = result.prediction_uid
         annotated = fetch_annotated_image(uid) if uid else None
 
         return ChatResponse(
@@ -221,8 +226,6 @@ def chat(request: ChatRequest):
         )
     finally:
         _current_image_b64.reset(image_token)
-        _last_prediction_uid.reset(uid_token)
-
 
 @app.get("/health")
 def health():
