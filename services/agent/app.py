@@ -6,6 +6,7 @@ import os
 import time
 from contextvars import ContextVar
 from typing import Optional
+from langchain_core.rate_limiters import InMemoryRateLimiter
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -76,8 +77,15 @@ TOOLS = {
     detect_objects.name: detect_objects
 }
 
-llm = init_chat_model(MODEL, temperature=0)
+# --- Rate limiter (Exercise: LLM API rate limits) ---
+# Throttle outgoing LLM requests so we stay under provider limits and avoid 429s.
+rate_limiter = InMemoryRateLimiter(
+    requests_per_second=0.5,     # ~1 request every 2 seconds
+    check_every_n_seconds=0.1,   # how often to check if a request can proceed
+    max_bucket_size=5,           # allow short bursts up to 5 requests
+)
 
+llm = init_chat_model(MODEL, temperature=0, rate_limiter=rate_limiter)
 # --- Capability check (Exercise: Model profiles) ---
 # Verify the chosen model supports the features the agent needs.
 try:
