@@ -41,8 +41,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 import torch
 torch.cuda.is_available = lambda: False
 
-app = FastAPI()
-
+app = FastAPI() #This one line creates my web application. Before this line,we have a Python script. After this line, you have a web server that can receive HTTP requests and send responses.
 # Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
 Instrumentator().instrument(app).expose(app)
 
@@ -133,14 +132,24 @@ def predict(file: UploadFile = File(...)):
 
 @app.get("/prediction/{uid}")
 def get_prediction_by_uid(uid: str, db: Session = Depends(get_db)):
+    # db: Session = Depends(get_db) — dependency injection. This tells FastAPI: "before running this function,
+    # call get_db(), take the session it yields, and pass it in as db."
+    # The endpoint didn't open a connection, didn't call a factory, didn't write any setup code. 
+    # It just said "I need a database session" and FastAPI delivered one.
     """
     Get prediction session by uid with all detected objects
     """
+    #This is the entire database query — one line. db.get() is SQLAlchemy's "get by primary key" shortcut.
+    # It says: "in the prediction_sessions table, find the row whose primary key (uid) equals the value I passed.
+    # " If found, session is a PredictionSession object with all its attributes filled in. If not found, session is None.
     session = db.get(PredictionSession, uid)
     if not session:
         raise HTTPException(status_code=404, detail="Prediction not found")
 
     return {
+    # Each key maps to an attribute of the PredictionSession object. 
+    # session.uid reads the uid column value, session.timestamp reads the timestamp, etc.
+    # weaccess database columns as Python attributes, not by indexing into a row or parsing SQL results.
         "uid": session.uid,
         "timestamp": session.timestamp,
         "original_image": session.original_image,
@@ -252,4 +261,6 @@ if __name__ == "__main__":
 
     init_db()
     
+    # it tells app to start listening on port 8080 for incoming requests.
+    # Before that line runs, app exists but isn't listening. After it, your service is live.
     uvicorn.run(app, host="0.0.0.0", port=8080)
