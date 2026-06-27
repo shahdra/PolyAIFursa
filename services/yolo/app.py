@@ -241,12 +241,6 @@ def get_predictions_objects_by_min_score(min_score: float, db: Session = Depends
         for row in rows
     ]
 
-@app.get("/print_hello")
-def print_hello():
-    """
-    Print hello endpoint
-    """
-    return {"message": "Hello from YOLO service!"}
 
 @app.get("/health")
 def health():
