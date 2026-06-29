@@ -70,6 +70,158 @@ If a session is deleted, related detection rows should also be removed (via casc
   - add a feedback table for prediction ratings
   - make the relation explicit and easy to query
 
+
+## Code Examples
+
+These cover the data-layer features described in the evals. They match the service's real **flat layout** (`services/yolo/app.py`, `services/yolo/database.py`) and its real conventions:
+
+- Errors are raised with `HTTPException`, never returned as a `(dict, status_code)` tuple — FastAPI ignores the status in a tuple and serializes it as a normal **200**.
+- `box` is stored and returned as a **string** (`str(box)`), not a list.
+- `timestamp` is serialized as an ISO-8601 string.
+- Read endpoints take a session via `Depends(get_db)`. The existing `save_*` write helpers open their own session from the module-level `SessionLocal`, so **extend those helpers** rather than writing inline `db.add(...)` in a handler.
+
+These are scaffolds, not drop-in code: match the real FK column names and the existing `save_*` signatures in `database.py` before pasting, then run `evals/run_evals.py` to confirm.
+
+### Models — adding `processing_time_ms` and `UserFeedback` (`database.py`)
+
+```python
+from datetime import datetime
+from sqlalchemy import Column, String, DateTime, Float, Integer, ForeignKey, Text
+from sqlalchemy.orm import relationship
+# Base, engine, SessionLocal, get_db, init_db already exist in this module.
+
+class PredictionSession(Base):
+    __tablename__ = "prediction_sessions"
+    uid = Column(String, primary_key=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    original_image = Column(String)
+    predicted_image = Column(String)
+    processing_time_ms = Column(Float, nullable=True)          # eval 5
+
+    detection_objects = relationship(
+        "DetectionObject",
+        back_populates="session",
+        cascade="all, delete-orphan",                          # ORM-side cascade
+    )
+    feedback = relationship(
+        "UserFeedback", uselist=False, cascade="all, delete-orphan"
+    )
+
+class DetectionObject(Base):
+    __tablename__ = "detection_objects"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # keep the FK column name that already exists in your file:
+    session_uid = Column(
+        String,
+        ForeignKey("prediction_sessions.uid", ondelete="CASCADE"),  # DB-side cascade
+    )
+    label = Column(String)
+    score = Column(Float)
+    box = Column(String)        # stored as str(box) — stays a string in responses
+    session = relationship("PredictionSession", back_populates="detection_objects")
+
+class UserFeedback(Base):                                      # eval 3
+    __tablename__ = "user_feedback"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_uid = Column(
+        String,
+        ForeignKey("prediction_sessions.uid", ondelete="CASCADE"),
+        unique=True,
+    )
+    rating = Column(Integer)
+    comment = Column(Text, nullable=True)
+```
+
+> **Cascade delete needs both halves.** `cascade="all, delete-orphan"` on the relationship handles it at the ORM level; `ondelete="CASCADE"` on the ForeignKey handles it at the DB level. One without the other leaves orphan rows.
+
+### Shared serializer (matches the real `GET /prediction/{uid}` shape)
+
+```python
+def session_to_dict(s):
+    return {
+        "uid": s.uid,
+        "timestamp": s.timestamp.isoformat(),                  # ISO-8601 string
+        "original_image": s.original_image,
+        "predicted_image": s.predicted_image,
+        "processing_time_ms": s.processing_time_ms,            # present once eval 5 is done
+        "detection_objects": [
+            {"id": o.id, "label": o.label, "score": o.score, "box": o.box}  # box is a str
+            for o in s.detection_objects
+        ],
+    }
+```
+
+### `GET /predictions/recent` (eval 2)
+
+```python
+from sqlalchemy import desc
+
+@app.get("/predictions/recent")
+def get_recent_predictions(db: Session = Depends(get_db)):
+    sessions = (
+        db.query(PredictionSession)
+        .order_by(desc(PredictionSession.timestamp))
+        .limit(10)
+        .all()
+    )
+    return [session_to_dict(s) for s in sessions]
+```
+
+### `DELETE /prediction/{uid}` (eval 4)
+
+```python
+from fastapi import HTTPException
+
+@app.delete("/prediction/{uid}")
+def delete_prediction(uid: str, db: Session = Depends(get_db)):
+    session = db.query(PredictionSession).filter(PredictionSession.uid == uid).first()
+    if not session:
+        # raise — do NOT `return {"detail": ...}, 404` (that serializes as a 200)
+        raise HTTPException(status_code=404, detail="Prediction not found")
+    db.delete(session)        # cascade removes detection_objects (+ feedback)
+    db.commit()
+    return {"detail": f"Deleted prediction session {uid}"}
+```
+
+### `processing_time_ms` — persist through the existing write helper (eval 5)
+
+`/predict` already exists, takes a **file upload**, and returns `{prediction_uid, detection_count, labels, time_took}` — don't change that contract. Thread the timing through the real persistence seam instead: extend `save_prediction_session` to accept and store it. The serializer above already returns it.
+
+```python
+# database.py — extend the existing helper; keep its current style/signature order
+def save_prediction_session(uid, original_image, predicted_image, processing_time_ms=None):
+    with SessionLocal() as db:
+        db.add(PredictionSession(
+            uid=uid,
+            original_image=original_image,
+            predicted_image=predicted_image,
+            processing_time_ms=processing_time_ms,
+        ))
+        db.commit()
+```
+
+### `UserFeedback` endpoints (eval 3)
+
+```python
+@app.post("/prediction/{uid}/feedback")
+def submit_feedback(uid: str, rating: int, comment: str | None = None,
+                    db: Session = Depends(get_db)):
+    session = db.query(PredictionSession).filter(PredictionSession.uid == uid).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+    db.add(UserFeedback(session_uid=uid, rating=rating, comment=comment))
+    db.commit()
+    return {"detail": "Feedback stored", "rating": rating}
+
+@app.get("/prediction/{uid}/feedback")
+def get_feedback(uid: str, db: Session = Depends(get_db)):
+    fb = db.query(UserFeedback).filter(UserFeedback.session_uid == uid).first()
+    if not fb:
+        raise HTTPException(status_code=404, detail="No feedback for this session")
+    return {"rating": fb.rating, "comment": fb.comment}
+```
+
+
 ## Configurable backend guidance
 
 If the request is to support multiple databases:
