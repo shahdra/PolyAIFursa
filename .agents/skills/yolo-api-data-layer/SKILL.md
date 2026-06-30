@@ -253,6 +253,9 @@ When adding or changing the data layer:
 3. Update the database layer before or alongside the endpoint logic so the API contract is grounded in the real schema.
 4. Verify behavior with focused tests or manual requests.
 5. If the request mentions production database switching, confirm the config is env-driven and not hardcoded.
+6. Before claiming the task is complete, run the eval runner and confirm the assertions for the matching eval pass:
+   `python .agents/skills/yolo-api-data-layer/evals/run_evals.py --pytest`
+   Static assertions check the code; `--pytest` runs the suite for behavioral ones. A SKIP that says "no test matching '…' yet" means you still owe a test for that behavior.
 
 ## Tooling note
 
@@ -266,3 +269,4 @@ If you run Python locally for verification, use the workspace interpreter under 
 - [ ] Deletion and cascading behavior are correct.
 - [ ] Configurable database settings are documented and env-driven.
 - [ ] Tests cover happy paths and obvious failure cases.
+- [ ] `run_evals.py --pytest` was run and the matching eval's assertions pass (no unexpected FAILs).
