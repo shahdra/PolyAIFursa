@@ -1,0 +1,25 @@
+# Runs the data-layer eval runner automatically on any PR touching the YOLO
+# service or its skill. Report-only: it surfaces eval status in the Actions
+# log but does NOT block merging, because evals for features you haven't built
+# yet will legitimately fail.
+name: data-layer-evals
+
+on:
+  pull_request:
+    paths:
+      - "services/yolo/**"
+      - ".agents/skills/yolo-api-data-layer/**"
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run data-layer evals (static checks, report only)
+        continue-on-error: true
+        run: python .agents/skills/yolo-api-data-layer/evals/run_evals.py
