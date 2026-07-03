@@ -34,6 +34,8 @@ ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
     "anthropic:claude-haiku-4-5",
     "google_genai:gemini-2.5-flash",
+    "bedrock:amazon.nova-lite-v1:0",
+
 }
 if MODEL not in ALLOWED_MODELS:
     allowed_list = "\n  ".join(sorted(ALLOWED_MODELS))
@@ -85,8 +87,13 @@ rate_limiter = InMemoryRateLimiter(
     max_bucket_size=5,           # allow short bursts up to 5 requests
 )
 
-llm = init_chat_model(MODEL, temperature=0, rate_limiter=rate_limiter)
-# --- Capability check (Exercise: Model profiles) ---
+model_kwargs = {"temperature": 0, "rate_limiter": rate_limiter}
+if MODEL.startswith("bedrock:"):
+    model_kwargs["region_name"] = "us-east-1"
+
+llm = init_chat_model(MODEL, **model_kwargs)
+# --- Capability check (Exerc
+# ise: Model profiles) ---
 # Verify the chosen model supports the features the agent needs.
 try:
     profile = llm.profile or {}
