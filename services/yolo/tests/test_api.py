@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 #when app.py was first imported, it read the env var and set CONFIDENCE_THRESHOLD to 0.7
 os.environ.setdefault("CONFIDENCE_THRESHOLD", "0.7")
 
+import app as app_module
 from app import app, init_db
 
 # creat a test image path and saving it in a variable to use in tests, the image file should be located at services/yolo/tests/data/beatles.jpeg
@@ -37,7 +38,6 @@ def test_confidence_threshold_value():
     assert CONFIDENCE_THRESHOLD == 0.7
 
 def test_handle_sigterm_sets_shutdown_flag():
-    import app as app_module
     app_module.is_shutting_down = False  # reset the actual module variable
 
     from app import handle_sigterm
@@ -46,3 +46,18 @@ def test_handle_sigterm_sets_shutdown_flag():
 
     assert app_module.is_shutting_down is True   # ✅ checks the right variable
     assert exc_info.value.code == 0
+
+
+def test_predict_returns_404_when_s3_download_fails(monkeypatch, client):
+    def mock_get_object(*args, **kwargs):
+        raise RuntimeError("S3 unavailable")
+
+    monkeypatch.setattr(app_module.s3_client, "get_object", mock_get_object)
+
+    response = client.post(
+        "/predict",
+        json={"image_s3_key": "uploads/original/missing.jpg"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Image not found in S3"}
