@@ -54,7 +54,7 @@ SYSTEM_PROMPT = (
 
 # Per-request context: the uploaded image, the last YOLO prediction uid, and
 # which tools were called. These flow AROUND the LLM (the model never sees image data).
-S3_BUCKET = os.environ["AWS_S3_BUCKET"]
+S3_BUCKET = os.environ.get("AWS_S3_BUCKET", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 s3_client = boto3.client("s3", region_name=AWS_REGION)
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
