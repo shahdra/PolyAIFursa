@@ -63,7 +63,7 @@ PREDICTED_DIR = "uploads/predicted" # Directory to save predicted images with bo
 DB_PATH = "predictions.db" # Path to the SQLite database file
 os.makedirs(UPLOAD_DIR, exist_ok=True) # Create the upload directories if they don't exist   
 os.makedirs(PREDICTED_DIR, exist_ok=True)
-S3_BUCKET = os.environ["AWS_S3_BUCKET"]
+S3_BUCKET = os.environ.get("AWS_S3_BUCKET", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 s3_client = boto3.client("s3", region_name=AWS_REGION)
 
