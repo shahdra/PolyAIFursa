@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import FileResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 from ultralytics import YOLO
@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 import logging
 import os
 import uuid
-import shutil
+import boto3
+from pydantic import BaseModel
+from dotenv import load_dotenv
 import time
 import signal
 import sys
@@ -22,7 +24,7 @@ from database import (
     save_prediction_session,
 )
 
-
+load_dotenv()
 is_shutting_down = False
 
 def handle_sigterm(signum, frame):
@@ -61,6 +63,9 @@ PREDICTED_DIR = "uploads/predicted" # Directory to save predicted images with bo
 DB_PATH = "predictions.db" # Path to the SQLite database file
 os.makedirs(UPLOAD_DIR, exist_ok=True) # Create the upload directories if they don't exist   
 os.makedirs(PREDICTED_DIR, exist_ok=True)
+S3_BUCKET = os.environ["AWS_S3_BUCKET"]
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+s3_client = boto3.client("s3", region_name=AWS_REGION)
 
 # Download the AI model (tiny model ~6MB)
 model = YOLO("yolov8n.pt")
@@ -76,58 +81,74 @@ def ready():
         raise HTTPException(status_code=503, detail="Service is shutting down")
     return {"status": "ready"}
 
-
+class PredictRequest(BaseModel):
+    image_s3_key: str
+    
 @app.post("/predict")
-def predict(file: UploadFile = File(...)):
-    # Record the start time of the prediction process to calculate how long it takes to process the image and return the results.
+def predict(request: PredictRequest):
+    # Record the start time to calculate how long processing takes.
     start_time = time.time()
     """
-    Predict objects in an image
+    Predict objects in an image stored in S3.
     """
-    ext = os.path.splitext(file.filename)[1]
-    #for debugging purposes
-    logging.info(f"Received file: {file.filename} with extension: {ext}")
+    image_s3_key = request.image_s3_key
+    logging.info(f"Received S3 key: {image_s3_key}")
 
+    ext = os.path.splitext(image_s3_key)[1] or ".jpg"
     if ext.lower() not in [".jpg", ".jpeg", ".png"]:
         raise HTTPException(status_code=400, detail="Only image files are supported")
-    
-    uid = str(uuid.uuid4())# Generate a unique identifier for this prediction session
-    original_path = os.path.join(UPLOAD_DIR, uid + ext) #create unique file paths for the original and predicted images using the generated uid and the original file extension
+
+    uid = str(uuid.uuid4())  # unique id for this prediction session (DB)
+    original_path = os.path.join(UPLOAD_DIR, uid + ext)
     predicted_path = os.path.join(PREDICTED_DIR, uid + ext)
 
-    with open(original_path, "wb") as f:
-        shutil.copyfileobj(file.file, f) # Save the uploaded file to disk at the originsl_path we just created.
+    # Download the original image from S3 to disk.
+    try:
+        s3_response = s3_client.get_object(Bucket=S3_BUCKET, Key=image_s3_key)
+        with open(original_path, "wb") as f:
+            f.write(s3_response["Body"].read())
+    except Exception as e:
+        logging.error(f"Failed to download {image_s3_key} from S3: {e}")
+        raise HTTPException(status_code=404, detail="Image not found in S3")
 
-    # Run the YOLO model on the saved image with the specified confidence threshold
+    # Run the YOLO model on the saved image.
     results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
-    # results is a list of results for each image (we only have one image, so we take the first result)
-    annotated_frame = results[0].plot()  # results[0].plot() returns a NumPy array with the bounding boxes drawn on the original image
-    # We convert the annotated frame to a PIL Image and save it to disk
-    #Image.fromarray() converts the numpy array to image with bounding boxes 
+    annotated_frame = results[0].plot()
     annotated_image = Image.fromarray(annotated_frame)
-    # We save the annotated image to the predicted path on disk
     annotated_image.save(predicted_path)
 
-    # We save the prediction session to the database, including the uid of the session, original image path, and predicted image path
+    # Upload the predicted image back to S3, reusing the original's key prefix
+    # so original and predicted sit together: <prefix>/predicted/image<ext>
+    key_prefix = image_s3_key.split("/original/")[0]
+    predicted_s3_key = f"{key_prefix}/predicted/image{ext}"
+    content_type = "image/png" if ext.lower() == ".png" else "image/jpeg"
+    with open(predicted_path, "rb") as f:
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=predicted_s3_key,
+            Body=f.read(),
+            ContentType=content_type,
+        )
+
+    # Save the prediction session to the database.
     save_prediction_session(uid, original_path, predicted_path)
-    
-    # We loop through the detected boxes in the results and save each detected object to the database with its label,
-    # confidence score, and bounding box coordinates. We also collect the labels of the detected objects in a list to include in the API response.
+
     detected_labels = []
     for box in results[0].boxes:
-        label_idx = int(box.cls[0].item()) # box.cls[0] gives us the class index of the detected object, which we convert to an integer and use to look up the corresponding label from the model's names list (model.names).
+        label_idx = int(box.cls[0].item())
         label = model.names[label_idx]
         score = float(box.conf[0])
-        bbox = box.xyxy[0].tolist() # box.xyxy[0] gives us the bounding box coordinates in the format [x_min, y_min, x_max, y_max], which we convert to a list for easier storage in the database.
+        bbox = box.xyxy[0].tolist()
         save_detection_object(uid, label, score, bbox)
         detected_labels.append(label)
 
     processing_time = round(time.time() - start_time, 2)
     return {
-        "prediction_uid": uid, # uid of the current predition session
+        "prediction_uid": uid,
         "detection_count": len(results[0].boxes),
         "labels": detected_labels,
-        "time_took": processing_time
+        "time_took": processing_time,
+        "predicted_s3_key": predicted_s3_key,
     }
 
 @app.get("/prediction/{uid}")
