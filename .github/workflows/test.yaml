@@ -35,6 +35,9 @@ jobs:
 
   scout-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # lets Scout post the CVE comment
     strategy:
       matrix:
         include:
