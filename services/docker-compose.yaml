@@ -1,0 +1,65 @@
+services:
+  frontend:
+    image: shahdra/frontend-service:0.0.1
+    container_name: frontend
+    ports:
+      - "3000:3000"              # frontend owns host 3000 (open this in the browser)
+    depends_on:
+      - agent
+    networks:
+      - polyai-net
+
+  agent:
+    image: shahdra/agent-service:0.0.1
+    container_name: agent
+    ports:
+      - "8000:8000"
+    environment:
+      YOLO_SERVICE_URL: http://yolo:8080
+      MODEL: google_genai:gemini-2.5-flash
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: shahd-polyai-images
+
+    depends_on:
+      - yolo
+    networks:
+      - polyai-net
+    # reached by the frontend at agent:8000
+
+  yolo:
+    image: shahdra/yolo-service:0.0.1
+    container_name: yolo
+    networks:
+      - polyai-net
+    # reached by agent and prometheus at yolo:8080
+
+  # ---- Monitoring building: monitoring-net ----
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml   # bind mount (edit on host)
+      - prometheus-data:/prometheus                        # named volume (persist)
+    networks:
+      - monitoring-net           # to reach grafana
+      - polyai-net               # ALSO joins app net to scrape yolo  ◄── the bridge
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    ports:
+      - "3001:3000"              # moved off 3000 to avoid clashing with frontend
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - monitoring-net
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  polyai-net:
+  monitoring-net:
