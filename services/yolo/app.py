@@ -109,7 +109,7 @@ def predict(request: PredictRequest):
             f.write(s3_response["Body"].read())
     except Exception as e:
         logging.error(f"Failed to download {image_s3_key} from S3: {e}")
-        raise HTTPException(status_code=404, detail="Image not found in S3")
+        raise HTTPException(status_code=404, detail="Image not found")
 
     # Run the YOLO model on the saved image.
     results = model(original_path, device="cpu", conf=CONFIDENCE_THRESHOLD)
