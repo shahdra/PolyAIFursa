@@ -60,4 +60,4 @@ def test_predict_returns_404_when_s3_download_fails(monkeypatch, client):
     )
 
     assert response.status_code == 404
-    assert response.json() == {"detail": "Image not found in S3"}
+    assert response.json() == {"detail": "Image not found"}
