@@ -1,12 +1,13 @@
 import base64
-import io
 import json
 import logging
 import os
 import time
+import uuid
 from contextvars import ContextVar
 from typing import Optional
 from langchain_core.rate_limiters import InMemoryRateLimiter
+
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -19,6 +20,8 @@ logging.getLogger("langchain").setLevel(logging.DEBUG)
 logging.getLogger("langchain_core").setLevel(logging.DEBUG)
 
 import httpx
+import boto3
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.chat_models import init_chat_model
@@ -51,6 +54,9 @@ SYSTEM_PROMPT = (
 
 # Per-request context: the uploaded image, the last YOLO prediction uid, and
 # which tools were called. These flow AROUND the LLM (the model never sees image data).
+S3_BUCKET = os.environ.get("AWS_S3_BUCKET", "")
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+s3_client = boto3.client("s3", region_name=AWS_REGION)
 _current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
 _tools_called: ContextVar[list] = ContextVar("tools_called", default=[])
 
@@ -61,16 +67,25 @@ def detect_objects() -> str:
     image_b64 = _current_image_b64.get()
     if not image_b64:
         return json.dumps({"error": "No image was provided by the user."})
-
     image_bytes = base64.b64decode(image_b64)
+
+    # Upload the original image to S3 and pass only the key to Yolo.
+    image_id = str(uuid.uuid4())
+    s3_key = f"{image_id}/original/image.jpg"
+    s3_client.put_object(
+        Bucket=S3_BUCKET,
+        Key=s3_key,
+        Body=image_bytes,
+        ContentType="image/jpeg",
+    )
+
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{YOLO_SERVICE_URL}/predict",
-            files={"file": ("image.jpg", io.BytesIO(image_bytes), "image/jpeg")},
+            json={"image_s3_key": s3_key},
         )
         response.raise_for_status()
     result = response.json()
-
     return json.dumps(result)
 
 
