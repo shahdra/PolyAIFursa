@@ -61,6 +61,19 @@ def crop(image_b64: str, left: int, top: int, right: int, bottom: int) -> str:
 
 
 @mcp.tool()
+def paste(base_image_b64: str, patch_b64: str, left: int, top: int) -> str:
+    """Paste a patch image onto a base image at the given top-left coordinates.
+
+    Used to composite a transformed region (e.g. a blurred bounding-box crop)
+    back into the full-size image it was cropped from.
+    """
+    base = _decode(base_image_b64)
+    patch = _decode(patch_b64)
+    base.paste(patch, (left, top))
+    return _encode(base)
+
+
+@mcp.tool()
 def add_noise(image_b64: str, amount: float = 0.1) -> str:
     """Add salt-and-pepper noise to an image."""
     img = _decode(image_b64)

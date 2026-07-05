@@ -1,11 +1,12 @@
 # Vision Agent
 
-A LangChain-powered AI vision agent with a manual ReAct loop. Accepts text and base64-encoded images, and can call tools (e.g. YOLO object detection) to answer questions.
+A LangChain-powered AI vision agent with a manual ReAct loop. Accepts text and base64-encoded images, and can call tools (e.g. YOLO object detection, image editing via MCP) to answer questions and edit images.
 
 ## Prerequisites
 
 - Python 3.10+
 - A running YOLO service (optional - only needed for `detect_objects`)
+- A running img-proc-mcp service (optional - only needed for image-editing tools; see `services/img-proc-mcp`)
 
 
 ## Setup
@@ -32,6 +33,7 @@ cp .env.example .env
 | `GOOGLE_API_KEY` | - | Required for Google models |
 | `MODEL` | `claude-sonnet-4-6` | Any model string supported by `init_chat_model` |
 | `YOLO_SERVICE_URL` | `http://localhost:8080` | URL of the YOLO microservice |
+| `IMG_PROC_MCP_URL` | `http://localhost:9000/mcp` | URL of the img-proc-mcp server |
 
 ## Running
 
@@ -89,9 +91,46 @@ Response:
 
 ```json
 {
-  "response": "string"
+  "response": "string",
+  "prediction_id": "string | null",
+  "annotated_image": "string | null",
+  "processed_image": "string | null",
+  "agent_loop_time_s": "number | null",
+  "iterations": "number | null",
+  "tools_called": ["string"],
+  "tokens_used": {"input": 0, "output": 0, "total": 0},
+  "context_limit_exceeded": false
 }
 ```
+
+`processed_image` is a base64 PNG, set whenever an image-editing tool ran (see below).
+
+## Image-editing tools (img-proc-mcp)
+
+In addition to `detect_objects`, the agent has tools that call the
+[img-proc-mcp](../img-proc-mcp) server to edit the uploaded image:
+
+| Tool | Arguments | Scope |
+|---|---|---|
+| `rotate_image` | `angle` | Whole image |
+| `flip_image` | `direction` (`horizontal`/`vertical`) | Whole image |
+| `resize_image` | `width`, `height` | Whole image |
+| `crop_image` | `left`, `top`, `right`, `bottom` | Whole image |
+| `blur_image` | `radius`, optional `left`/`top`/`right`/`bottom` | Whole image, or one detected object |
+| `add_noise_image` | `amount`, optional `left`/`top`/`right`/`bottom` | Whole image, or one detected object |
+
+To target a specific object (e.g. "blur the second dog from the right"), the model
+first calls `detect_objects`, which returns an `objects` list of
+`{label, score, box: [left, top, right, bottom]}`. The model works out which object
+is meant from those coordinates and passes that exact box to `blur_image` /
+`add_noise_image`. Omitting the box arguments (or using `rotate_image` /
+`flip_image` / `resize_image` / `crop_image`, which always act on the whole image)
+affects the entire image instead.
+
+The image itself never enters the LLM's context — tool results only ever describe
+*what* was done (status, operation, box), never image bytes. The actual base64
+result is threaded back to `/chat` through `AgentResult.processed_image_b64` and
+returned to the caller as `processed_image`.
 
 ### `GET /health`
 

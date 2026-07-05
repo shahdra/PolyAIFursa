@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -7,6 +8,7 @@ import uuid
 from contextvars import ContextVar
 from typing import Optional
 from langchain_core.rate_limiters import InMemoryRateLimiter
+from fastmcp import Client as MCPClient
 
 
 from dotenv import load_dotenv
@@ -30,6 +32,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel
 
 YOLO_SERVICE_URL = os.environ.get("YOLO_SERVICE_URL", "http://localhost:8080")
+IMG_PROC_MCP_URL = os.environ.get("IMG_PROC_MCP_URL", "http://localhost:9000/mcp")
 MODEL = os.environ.get("MODEL")
 
 # Text-only models
@@ -49,11 +52,19 @@ if MODEL not in ALLOWED_MODELS:
 
 SYSTEM_PROMPT = (
     "You are an AI vision assistant. You help users understand and analyze images. "
-    "Use the available tools to extract information from images. "
+    "Use the available tools to extract information from images and to edit them. "
+    "Call detect_objects first when a request refers to a specific object (e.g. 'the second "
+    "dog from the right', 'the detected car'). Its result includes an 'objects' list where each "
+    "entry has a label, score and box=[left, top, right, bottom] in pixels — use those "
+    "coordinates to work out which object the user means (e.g. sort by the box's left "
+    "coordinate to rank objects left-to-right), then pass that exact box as the left/top/right/"
+    "bottom arguments to blur_image or add_noise_image to affect only that object. Omit all four "
+    "box arguments (or call rotate_image / flip_image / resize_image / crop_image, which always "
+    "act on the whole image) to affect the entire image."
 )
 
-# Per-request context: the uploaded image, the last YOLO prediction uid, and
-# which tools were called. These flow AROUND the LLM (the model never sees image data).
+# Per-request context: the uploaded image and which tools were called. This flows
+# AROUND the LLM (the model never sees image data, only text describing it).
 S3_BUCKET = os.environ.get("AWS_S3_BUCKET", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 s3_client = boto3.client("s3", region_name=AWS_REGION)
@@ -85,13 +96,167 @@ def detect_objects() -> str:
             json={"image_s3_key": s3_key},
         )
         response.raise_for_status()
-    result = response.json()
+        result = response.json()
+
+        uid = result.get("prediction_uid")
+        objects = []
+        if uid:
+            detail_response = client.get(f"{YOLO_SERVICE_URL}/prediction/{uid}")
+            detail_response.raise_for_status()
+            for obj in detail_response.json().get("detection_objects", []):
+                # Round to whole pixels: the edit tools take integer box coordinates,
+                # and the model just copies this "box" back into its next tool call.
+                box = [round(c) for c in obj["box"]]
+                objects.append({"label": obj["label"], "score": obj["score"], "box": box})
+
+    result["objects"] = objects
     return json.dumps(result)
+
+
+def _call_img_proc_tool(tool_name: str, **kwargs) -> str:
+    """Call a tool on the img-proc-mcp server over MCP and return its string result."""
+    async def _call() -> str:
+        async with MCPClient(IMG_PROC_MCP_URL) as client:
+            result = await client.call_tool(tool_name, kwargs)
+            return result.data
+    return asyncio.run(_call())
+
+
+def _box_from_args(
+    left: Optional[int], top: Optional[int], right: Optional[int], bottom: Optional[int]
+) -> Optional[tuple]:
+    """Validate a set of optional box coordinates: all four or none."""
+    coords = (left, top, right, bottom)
+    if all(c is None for c in coords):
+        return None
+    if any(c is None for c in coords):
+        raise ValueError("Provide all four of left, top, right, bottom, or none of them.")
+    return coords
+
+
+def _apply_transform(tool_name: str, box: Optional[tuple] = None, **params) -> str:
+    """
+    Run an img-proc-mcp transform on the current image and return the resulting
+    base64 PNG.
+
+    If box is None, the transform is applied to the whole image in a single MCP
+    call. If box is given (left, top, right, bottom), only that region is sent for
+    transformation (crop -> transform -> paste), so the edit is localized to the
+    target object and the MCP payload stays as small as the target region rather
+    than the full image.
+    """
+    image_b64 = _current_image_b64.get()
+    if not image_b64:
+        raise ValueError("No image was provided by the user.")
+
+    if box is None:
+        return _call_img_proc_tool(tool_name, image_b64=image_b64, **params)
+
+    left, top, right, bottom = box
+    patch_b64 = _call_img_proc_tool(
+        "crop", image_b64=image_b64, left=left, top=top, right=right, bottom=bottom
+    )
+    transformed_patch_b64 = _call_img_proc_tool(tool_name, image_b64=patch_b64, **params)
+    return _call_img_proc_tool(
+        "paste", base_image_b64=image_b64, patch_b64=transformed_patch_b64, left=left, top=top
+    )
+
+
+@tool
+def rotate_image(angle: float = 90.0) -> str:
+    """Rotate the entire image by the given angle in degrees (counter-clockwise)."""
+    try:
+        image_b64 = _apply_transform("rotate", angle=angle)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps({"status": "ok", "operation": "rotate", "angle": angle, "image_b64": image_b64})
+
+
+@tool
+def flip_image(direction: str = "horizontal") -> str:
+    """Flip the entire image. direction must be 'horizontal' or 'vertical'."""
+    try:
+        image_b64 = _apply_transform("flip", direction=direction)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps({"status": "ok", "operation": "flip", "direction": direction, "image_b64": image_b64})
+
+
+@tool
+def resize_image(width: int, height: int) -> str:
+    """Resize the entire image to the given width and height in pixels."""
+    try:
+        image_b64 = _apply_transform("resize", width=width, height=height)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps(
+        {"status": "ok", "operation": "resize", "width": width, "height": height, "image_b64": image_b64}
+    )
+
+
+@tool
+def crop_image(left: int, top: int, right: int, bottom: int) -> str:
+    """Crop the entire image to the given bounding-box coordinates (pixels)."""
+    try:
+        image_b64 = _apply_transform("crop", left=left, top=top, right=right, bottom=bottom)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps(
+        {"status": "ok", "operation": "crop", "box": [left, top, right, bottom], "image_b64": image_b64}
+    )
+
+
+@tool
+def blur_image(
+    radius: float = 2.0,
+    left: Optional[int] = None,
+    top: Optional[int] = None,
+    right: Optional[int] = None,
+    bottom: Optional[int] = None,
+) -> str:
+    """
+    Apply Gaussian blur to the image. To blur a single detected object, pass its
+    box coordinates exactly as returned in detect_objects' 'objects' list (left,
+    top, right, bottom); omit all four to blur the whole image.
+    """
+    try:
+        box = _box_from_args(left, top, right, bottom)
+        image_b64 = _apply_transform("blur", box, radius=radius)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps({"status": "ok", "operation": "blur", "box": box, "image_b64": image_b64})
+
+
+@tool
+def add_noise_image(
+    amount: float = 0.1,
+    left: Optional[int] = None,
+    top: Optional[int] = None,
+    right: Optional[int] = None,
+    bottom: Optional[int] = None,
+) -> str:
+    """
+    Add salt-and-pepper noise to the image. To affect a single detected object,
+    pass its box coordinates exactly as returned in detect_objects' 'objects' list
+    (left, top, right, bottom); omit all four to affect the whole image.
+    """
+    try:
+        box = _box_from_args(left, top, right, bottom)
+        image_b64 = _apply_transform("add_noise", box, amount=amount)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
+    return json.dumps({"status": "ok", "operation": "add_noise", "box": box, "image_b64": image_b64})
 
 
 # Registry: map tool name -> tool function
 TOOLS = {
-    detect_objects.name: detect_objects
+    detect_objects.name: detect_objects,
+    rotate_image.name: rotate_image,
+    flip_image.name: flip_image,
+    resize_image.name: resize_image,
+    crop_image.name: crop_image,
+    blur_image.name: blur_image,
+    add_noise_image.name: add_noise_image,
 }
 
 # --- Rate limiter (Exercise: LLM API rate limits) ---
@@ -141,6 +306,7 @@ class AgentResult(BaseModel):
     iterations: int
     tools_called: list[str]
     prediction_uid: Optional[str] = None
+    processed_image_b64: Optional[str] = None
     tokens_used: dict = {"input": 0, "output": 0, "total": 0}
     context_limit_exceeded: bool = False
 
@@ -156,6 +322,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
     tools_called: list[str] = []
     prediction_uid: Optional[str] = None
+    processed_image_b64: Optional[str] = None
     tokens = {"input": 0, "output": 0, "total": 0}
 
     for i in range(1, max_iterations + 1):
@@ -184,6 +351,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
                 iterations=i,
                 tools_called=tools_called,
                 prediction_uid=prediction_uid,
+                processed_image_b64=processed_image_b64,
                 tokens_used=tokens,
             )
 
@@ -194,13 +362,22 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
             tool_result = tool_fn.invoke(tool_call)          # returns a ToolMessage
             messages.append(tool_result)
 
-            # Capture the YOLO prediction uid from the tool's JSON result
+            # Capture the YOLO prediction uid and any processed-image result from
+            # the tool's JSON result. The processed image is stripped out of the
+            # ToolMessage content before it re-enters the LLM's context on the next
+            # iteration — the model reasons about images, it never sees their bytes.
             try:
                 parsed = json.loads(tool_result.content)
-                if isinstance(parsed, dict) and parsed.get("prediction_uid"):
-                    prediction_uid = parsed["prediction_uid"]
             except (json.JSONDecodeError, AttributeError):
-                pass
+                parsed = None
+
+            if isinstance(parsed, dict):
+                if parsed.get("prediction_uid"):
+                    prediction_uid = parsed["prediction_uid"]
+                if parsed.get("image_b64"):
+                    processed_image_b64 = parsed["image_b64"]
+                    redacted = {k: v for k, v in parsed.items() if k != "image_b64"}
+                    tool_result.content = json.dumps(redacted)
 
     # Hit the iteration cap without a final answer
     return AgentResult(
@@ -208,6 +385,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
         iterations=max_iterations,
         tools_called=tools_called,
         prediction_uid=prediction_uid,
+        processed_image_b64=processed_image_b64,
         tokens_used=tokens,
         context_limit_exceeded=True,
     )
@@ -253,6 +431,7 @@ class ChatResponse(BaseModel):
     response: str
     prediction_id: Optional[str] = None
     annotated_image: Optional[str] = None      # base64 of the bounding-box image
+    processed_image: Optional[str] = None      # base64 result of an img-proc-mcp edit
     agent_loop_time_s: Optional[float] = None
     iterations: Optional[int] = None
     tools_called: list[str] = []
@@ -289,6 +468,7 @@ def chat(request: ChatRequest):
             response=result.text,
             prediction_id=uid,
             annotated_image=annotated,
+            processed_image=result.processed_image_b64,
             agent_loop_time_s=elapsed,
             iterations=result.iterations,
             tools_called=result.tools_called,

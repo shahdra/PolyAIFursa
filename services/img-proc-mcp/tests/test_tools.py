@@ -3,7 +3,7 @@ import io
 
 from PIL import Image
 
-from app import add_noise, blur, crop, flip, resize, rotate
+from app import add_noise, blur, crop, flip, mcp, paste, resize, rotate
 
 
 def _encode(img: Image.Image) -> str:
@@ -38,3 +38,22 @@ def test_crop_and_blur_and_noise_transform_images():
 
     noisy = Image.open(io.BytesIO(base64.b64decode(add_noise(b64, amount=0.5))))
     assert noisy.size == (10, 10)
+
+
+def test_paste_composites_a_patch_onto_the_base_image():
+    base = Image.new("RGB", (10, 10), color=(255, 0, 0))
+    patch = Image.new("RGB", (4, 4), color=(0, 255, 0))
+
+    result = Image.open(io.BytesIO(base64.b64decode(paste(_encode(base), _encode(patch), left=2, top=3))))
+
+    assert result.size == (10, 10)
+    assert result.getpixel((3, 4)) == (0, 255, 0)  # inside the pasted patch
+    assert result.getpixel((0, 0)) == (255, 0, 0)  # untouched base pixel
+
+
+def test_all_tools_are_registered_with_the_mcp_server():
+    import asyncio
+
+    tools = asyncio.run(mcp.list_tools())
+    registered = {t.name for t in tools}
+    assert registered == {"rotate", "flip", "blur", "resize", "crop", "add_noise", "paste"}
