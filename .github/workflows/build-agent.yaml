@@ -50,24 +50,28 @@ jobs:
           key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
           # AGENT_IMAGE_TAG is read inline by docker-compose.yaml's
           # ${AGENT_IMAGE_TAG:-local} substitution on the remote host.
-          envs: AGENT_IMAGE_TAG
+          envs: AGENT_IMAGE_TAG,ALLOWED_ORIGINS
           script: |
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B dev origin/dev
-            # Persist this service's tag into the root .env (gitignored, survives
-            # git checkout) instead of only exporting it for this SSH session -
-            # otherwise a later scoped deploy of a DIFFERENT service, or a bare
-            # `docker compose up -d`, would fall back to this stale/unpublished
-            # tag via depends_on. Upsert: drop any existing AGENT_IMAGE_TAG line,
-            # then append the current one.
+            # Persist this service's tag (and its CORS origin) into the root
+            # .env (gitignored, survives git checkout) instead of only
+            # exporting them for this SSH session - otherwise a later scoped
+            # deploy of a DIFFERENT service, or a bare `docker compose up -d`,
+            # would fall back to a stale/unpublished tag via depends_on, or
+            # ALLOWED_ORIGINS would revert to localhost and break the deployed
+            # frontend with CORS "Failed to fetch". Upsert: drop any existing
+            # line for each var, then append the current one.
             touch .env
-            grep -v '^AGENT_IMAGE_TAG=' .env > .env.tmp || true
+            grep -vE '^(AGENT_IMAGE_TAG|ALLOWED_ORIGINS)=' .env > .env.tmp || true
             echo "AGENT_IMAGE_TAG=$AGENT_IMAGE_TAG" >> .env.tmp
+            echo "ALLOWED_ORIGINS=$ALLOWED_ORIGINS" >> .env.tmp
             mv .env.tmp .env
             docker compose up -d agent
         env:
           AGENT_IMAGE_TAG: ${{ github.sha }}
+          ALLOWED_ORIGINS: http://${{ secrets.DEV_INSTANCE_IP }}:3000
 
   deploy-prod:
     needs: build
@@ -80,17 +84,19 @@ jobs:
           host: ${{ secrets.PROD_INSTANCE_IP }}
           username: ubuntu
           key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
-          envs: AGENT_IMAGE_TAG
+          envs: AGENT_IMAGE_TAG,ALLOWED_ORIGINS
           script: |
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B main origin/main
-            # See deploy-dev above: persist into .env so it doesn't go stale for
-            # other services' scoped deploys or a bare `docker compose up -d`.
+            # See deploy-dev above: persist into .env so these don't go stale
+            # for other services' scoped deploys or a bare `docker compose up -d`.
             touch .env
-            grep -v '^AGENT_IMAGE_TAG=' .env > .env.tmp || true
+            grep -vE '^(AGENT_IMAGE_TAG|ALLOWED_ORIGINS)=' .env > .env.tmp || true
             echo "AGENT_IMAGE_TAG=$AGENT_IMAGE_TAG" >> .env.tmp
+            echo "ALLOWED_ORIGINS=$ALLOWED_ORIGINS" >> .env.tmp
             mv .env.tmp .env
             docker compose up -d agent
         env:
           AGENT_IMAGE_TAG: ${{ github.sha }}
+          ALLOWED_ORIGINS: http://${{ secrets.PROD_INSTANCE_IP }}:3000
