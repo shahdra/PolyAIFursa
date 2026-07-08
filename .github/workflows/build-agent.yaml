@@ -12,6 +12,10 @@ on:
     # service independently buildable/deployable per the task requirement.
     paths:
       - "services/agent/**"
+  # Lets this be re-run on demand (Actions tab -> "Run workflow", or
+  # `gh workflow run`) for changes that don't touch services/agent/** but
+  # still need a redeploy - e.g. compose-level env vars like ALLOWED_ORIGINS.
+  workflow_dispatch:
 
 jobs:
   build:
