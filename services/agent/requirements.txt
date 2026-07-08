@@ -1,5 +1,6 @@
 fastapi
 uvicorn[standard]
+prometheus-fastapi-instrumentator   # exposes GET /metrics for Prometheus, same as the yolo service
 python-dotenv
 langchain
 langgraph

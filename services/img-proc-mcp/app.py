@@ -109,4 +109,8 @@ def add_noise(image_b64: str, amount: float = 0.1, box: list[int] | None = None)
 
 
 if __name__ == "__main__":
-    mcp.run(transport="http", port=9000)
+    # allowed_hosts="*": this server is only reachable inside the compose
+    # network (never exposed publicly), and the agent talks to it via the
+    # service name "img-proc-mcp", which FastMCP's Host-header guard would
+    # otherwise reject as a DNS-rebinding attempt.
+    mcp.run(transport="http", host="0.0.0.0", port=9000, allowed_hosts=["*"])

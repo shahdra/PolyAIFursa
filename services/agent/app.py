@@ -25,6 +25,10 @@ import boto3
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+# Auto-instruments FastAPI (request count/latency/etc.) and serves it at
+# GET /metrics in Prometheus text format, so Prometheus can scrape the agent
+# the same way it already scrapes the yolo service.
+from prometheus_fastapi_instrumentator import Instrumentator
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
@@ -291,6 +295,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
     processed_image_b64: Optional[str] = None
     tokens = {"input": 0, "output": 0, "total": 0}
     edit_nudges = 0
+    empty_nudges = 0
 
     for i in range(1, max_iterations + 1):
         response: AIMessage = llm_with_tools.invoke(messages)
@@ -326,6 +331,18 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
                     "You have NOT edited anything yet - you only detected. Do not call "
                     "detect_objects again. Call the edit tool now (blur/crop/flip/rotate) "
                     "and pass the target object's box. The box is already in the messages above."
+                )))
+                continue
+
+            # Guard: some models return a completely empty turn (no text, no tool
+            # call) when the full tool set is bound - a provider-side stall, not a
+            # deliberate answer. Retry once instead of handing the user a blank reply.
+            if not content.strip() and empty_nudges < 1 and i < max_iterations:
+                empty_nudges += 1
+                messages.append(HumanMessage(content=(
+                    "Your last reply was empty. Either call the appropriate tool "
+                    "(detect_objects, or an edit tool) or answer the user's question "
+                    "in plain text - do not reply with nothing."
                 )))
                 continue
 
@@ -413,6 +430,9 @@ def fetch_annotated_image(uid: str) -> Optional[str]:
 
 
 app = FastAPI(title="Vision Agent")
+# Wire up the /metrics endpoint (mirrors services/yolo/app.py) so this
+# service shows up as a Prometheus scrape target at agent:8000/metrics.
+Instrumentator().instrument(app).expose(app)
 
 ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS", "http://localhost:3000"

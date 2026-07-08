@@ -1,0 +1,118 @@
+services:
+  frontend:
+    # Tag is injected per-deploy by CI (build-frontend.yaml pushes shahdra/frontend-service:<sha>);
+    # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
+    image: shahdra/frontend-service:${FRONTEND_IMAGE_TAG:-local}
+    container_name: frontend
+    ports:
+      - "3000:3000"              # frontend owns host 3000 (open this in the browser)
+    depends_on:
+      - agent
+    networks:
+      - polyai-net
+
+  agent:
+    # Tag is injected per-deploy by CI (build-agent.yaml pushes shahdra/agent-service:<sha>);
+    # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
+    image: shahdra/agent-service:${AGENT_IMAGE_TAG:-local}
+    container_name: agent
+    ports:
+      - "8000:8000"
+    environment:
+      YOLO_SERVICE_URL: http://yolo:8080
+      IMG_PROC_MCP_URL: http://img-proc-mcp:9000/mcp
+      MODEL: bedrock:amazon.nova-lite-v1:0
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: shahd-polyai-images
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+
+    depends_on:
+      - yolo
+      - img-proc-mcp
+    networks:
+      - polyai-net
+    # reached by the frontend at agent:8000
+
+  yolo:
+    # Tag is injected per-deploy by CI (build-yolo.yaml pushes shahdra/yolo-service:<sha>);
+    # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
+    image: shahdra/yolo-service:${YOLO_IMAGE_TAG:-local}
+    container_name: yolo
+    environment:
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: shahd-polyai-images
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    networks:
+      - polyai-net
+    # reached by agent and prometheus at yolo:8080
+
+  img-proc-mcp:
+    # Tag is injected per-deploy by CI (build-img-proc-mcp.yaml pushes shahdra/img-proc-mcp-service:<sha>);
+    # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
+    image: shahdra/img-proc-mcp-service:${IMG_PROC_IMAGE_TAG:-local}
+    container_name: img-proc-mcp
+    networks:
+      - polyai-net
+    # reached by agent at img-proc-mcp:9000/mcp
+
+  # ---- Monitoring building: monitoring-net ----
+  # Node Exporter: reads host-level metrics (CPU, memory, disk, network) from
+  # the underlying Linux system and exposes them at /metrics in Prometheus
+  # format, since the OS itself doesn't natively speak Prometheus.
+  node-exporter:
+    image: prom/node-exporter
+    container_name: node-exporter
+    command:
+      # Tell node-exporter where to find the *host's* /proc, /sys, / inside
+      # the container, since we mount them under /host/* below instead of
+      # overlaying the container's own paths (safer, avoids clobbering them).
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/host/root'
+      # Exclude pseudo/container filesystems from the filesystem collector so
+      # disk-usage metrics reflect the real host mounts, not container internals.
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      # Mount host /proc, /sys, / read-only so node-exporter can read metrics
+      # without being able to modify anything on the host.
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+    networks:
+      # No published port: only Prometheus (also on monitoring-net) needs to
+      # scrape it, reachable internally at node-exporter:9100.
+      - monitoring-net           # reached by prometheus at node-exporter:9100
+
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./services/prometheus.yml:/etc/prometheus/prometheus.yml   # bind mount (edit on host)
+      - prometheus-data:/prometheus                        # named volume (persist)
+    networks:
+      - monitoring-net           # to reach grafana
+      - polyai-net               # ALSO joins app net to scrape yolo  ◄── the bridge
+
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    ports:
+      - "3001:3000"              # moved off 3000 to avoid clashing with frontend
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./services/grafana/provisioning:/etc/grafana/provisioning   # auto-wires datasource + dashboard provider
+      - ./services/grafana/dashboards:/var/lib/grafana/dashboards   # dashboard JSON (FastAPI Observability, 22676)
+    networks:
+      - monitoring-net
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  polyai-net:
+  monitoring-net:
