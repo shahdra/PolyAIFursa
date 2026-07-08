@@ -47,6 +47,7 @@ app = FastAPI() #This one line creates my web application. Before this line,we h
 # Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
 Instrumentator().instrument(app).expose(app)
 
+
 # Confidence threshold for object detection (0.0 - 1.0).
 # Detections below this score are discarded.
 # Override with: export CONFIDENCE_THRESHOLD=0.7

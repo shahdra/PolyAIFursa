@@ -55,7 +55,17 @@ jobs:
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B dev origin/dev
-            AGENT_IMAGE_TAG=$AGENT_IMAGE_TAG docker compose up -d agent
+            # Persist this service's tag into the root .env (gitignored, survives
+            # git checkout) instead of only exporting it for this SSH session -
+            # otherwise a later scoped deploy of a DIFFERENT service, or a bare
+            # `docker compose up -d`, would fall back to this stale/unpublished
+            # tag via depends_on. Upsert: drop any existing AGENT_IMAGE_TAG line,
+            # then append the current one.
+            touch .env
+            grep -v '^AGENT_IMAGE_TAG=' .env > .env.tmp || true
+            echo "AGENT_IMAGE_TAG=$AGENT_IMAGE_TAG" >> .env.tmp
+            mv .env.tmp .env
+            docker compose up -d agent
         env:
           AGENT_IMAGE_TAG: ${{ github.sha }}
 
@@ -75,6 +85,12 @@ jobs:
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B main origin/main
-            AGENT_IMAGE_TAG=$AGENT_IMAGE_TAG docker compose up -d agent
+            # See deploy-dev above: persist into .env so it doesn't go stale for
+            # other services' scoped deploys or a bare `docker compose up -d`.
+            touch .env
+            grep -v '^AGENT_IMAGE_TAG=' .env > .env.tmp || true
+            echo "AGENT_IMAGE_TAG=$AGENT_IMAGE_TAG" >> .env.tmp
+            mv .env.tmp .env
+            docker compose up -d agent
         env:
           AGENT_IMAGE_TAG: ${{ github.sha }}
