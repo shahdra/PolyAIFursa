@@ -19,6 +19,9 @@ on:
     # service independently buildable/deployable per the task requirement.
     paths:
       - "services/frontend/**"
+  # Lets this be re-run on demand (Actions tab -> "Run workflow", or
+  # `gh workflow run`) for redeploys that don't need a fresh image build.
+  workflow_dispatch:
 
 jobs:
   build-dev:
