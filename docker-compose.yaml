@@ -26,6 +26,11 @@ services:
       AWS_S3_BUCKET: shahd-polyai-images
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      # CORS: must match the origin the browser actually loads the frontend
+      # from. Defaults to localhost for local dev; set in .env per instance
+      # (e.g. http://<DEV_INSTANCE_IP>:3000) so the deployed frontend isn't
+      # silently blocked by the browser with "Failed to fetch".
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
 
     depends_on:
       - yolo
