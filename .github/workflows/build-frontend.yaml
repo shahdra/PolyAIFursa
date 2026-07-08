@@ -1,6 +1,13 @@
 # Part III (containerization): builds and pushes the frontend service image
 # on every change under services/frontend/**. Runs independently of the other
 # three build-*.yaml workflows so touching one service never rebuilds the others.
+#
+# Frontend is special among the four services: NEXT_PUBLIC_AGENT_URL gets
+# baked into the client-side JS bundle at build time (Next.js only reads
+# NEXT_PUBLIC_* vars at build time, never at runtime), and dev/prod need a
+# DIFFERENT baked-in URL (their own instance's agent endpoint). So unlike the
+# other three services, this workflow builds two distinct images per push -
+# one tagged "<sha>-dev", one "<sha>-prod" - rather than a single shared tag.
 name: Build & Push Frontend
 
 on:
@@ -14,7 +21,8 @@ on:
       - "services/frontend/**"
 
 jobs:
-  build:
+  build-dev:
+    if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,20 +33,44 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push frontend image
+      - name: Build and push frontend image (dev)
         uses: docker/build-push-action@v6
         with:
           context: services/frontend
           push: true
-          # Tag with the commit SHA so every build gets a unique, traceable
-          # tag - never "latest", never reused across builds (see task notes).
-          tags: shahdra/frontend-service:${{ github.sha }}
+          # Bake in the dev instance's own agent URL at build time.
+          build-args: |
+            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:8000
+          # -dev suffix (not just the bare sha) so this can never collide with
+          # a -prod build of the same commit that bakes in a different URL.
+          tags: shahdra/frontend-service:${{ github.sha }}-dev
+
+  build-prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push frontend image (prod)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/frontend
+          push: true
+          build-args: |
+            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.PROD_INSTANCE_IP }}:8000
+          tags: shahdra/frontend-service:${{ github.sha }}-prod
 
   # Deploys only the frontend service to the dev box - `docker compose up -d frontend`
   # recreates just that one container, leaving agent/yolo/img-proc-mcp/monitoring
   # untouched. Mirrors deploy.yaml's existing dev/prod SSH-branch split.
   deploy-dev:
-    needs: build   # don't deploy an image that failed to build/push
+    needs: build-dev   # don't deploy an image that failed to build/push
     if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     steps:
@@ -67,10 +99,10 @@ jobs:
             mv .env.tmp .env
             docker compose up -d frontend
         env:
-          FRONTEND_IMAGE_TAG: ${{ github.sha }}
+          FRONTEND_IMAGE_TAG: ${{ github.sha }}-dev
 
   deploy-prod:
-    needs: build
+    needs: build-prod
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -93,4 +125,4 @@ jobs:
             mv .env.tmp .env
             docker compose up -d frontend
         env:
-          FRONTEND_IMAGE_TAG: ${{ github.sha }}
+          FRONTEND_IMAGE_TAG: ${{ github.sha }}-prod

@@ -17,6 +17,11 @@ FROM base AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# NEXT_PUBLIC_* vars are baked into the client JS bundle at build time, not
+# read at runtime - so the agent's URL must be supplied as a build arg per
+# environment (dev vs prod point at different instance IPs).
+ARG NEXT_PUBLIC_AGENT_URL
+ENV NEXT_PUBLIC_AGENT_URL=${NEXT_PUBLIC_AGENT_URL}
 RUN npm run build
 
 FROM base AS runner
