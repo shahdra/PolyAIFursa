@@ -67,7 +67,7 @@ export default function Chat() {
           role: "assistant",
           content: reply.response,
           ...(reply.processed_image || reply.annotated_image
-            ? { image_base64: reply.processed_image ?? reply.annotated_image }
+            ? { image_base64: reply.processed_image ?? reply.annotated_image ?? undefined }
             : {}),
         },
       ]);
