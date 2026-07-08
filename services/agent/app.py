@@ -8,7 +8,7 @@ import uuid
 from contextvars import ContextVar
 from typing import Optional
 from langchain_core.rate_limiters import InMemoryRateLimiter
-
+import ast
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -39,10 +39,11 @@ MODEL = os.environ.get("MODEL")
 # Text-only models
 ALLOWED_MODELS = {
     "openai:gpt-5.4-mini",
-    "anthropic:claude-haiku-4-5",
+    "bedrock:anthropic:claude-haiku-4-5",
     "google_genai:gemini-2.5-flash",
     "bedrock:amazon.nova-lite-v1:0",
-
+    "bedrock:anthropic.claude-opus-4-7",
+    "bedrock:us.meta.llama3-1-8b-instruct-v1:0",
 }
 if MODEL not in ALLOWED_MODELS:
     allowed_list = "\n  ".join(sorted(ALLOWED_MODELS))
@@ -64,13 +65,37 @@ SYSTEM_PROMPT = (
     "do not ask the user for them - the image is supplied to the tools automatically. Only "
     "choose the operation and its parameters (angle, radius, width/height, box, ...).\n"
     "- When a request targets a specific object (e.g. 'the second dog from the right' or "
-    "'the detected car'), call detect_objects first and use the returned bounding boxes to "
-    "figure out which object is meant - for example, rank the objects by the left edge of "
-    "their box - then use that box as the coordinates for the edit (e.g. crop).\n"
-    "- rotate, flip, blur, resize and add_noise act on the whole current image; crop "
-    "extracts the given rectangular region.\n"
+    "'the detected car'), call detect_objects first, then pick the object using this EXACT "
+    "procedure:\n"
+    "  1. Sort the detected objects by box[0] (the left edge), SMALLEST first.\n"
+    "  2. This sorted list now runs left-to-right across the image.\n"
+    "  3. 'first' / 'leftmost' = position 1. 'second from the left' = position 2. "
+    "'rightmost' = the LAST position. 'second from the right' = second-to-last. "
+    "'middle' = the center position (e.g. position 2 of 3).\n"
+    "  4. Count from the correct end: 'from the left' starts at the SMALLEST"
+    "box[0] (left edge); 'from the right' starts at the LARGEST box[0]"
+    "(still the left edge - you rank every object by box[0] and just"
+    "count from the opposite end)..\n"
+    "  Do NOT assume the detected objects are already in left-to-right order - they are "
+    "not, so you must sort by box[0] yourself first. Then use that object's box for the edit.\n"
+    "- When the request does NOT name a specific object, apply the edit to the WHOLE "
+    "image. Do not run detection and do not ask which object - just perform the operation "
+    "on the entire image. Only target a specific object when the user clearly names one.\n"
+    "- If a word looks like a misspelled operation (e.g. 'herozantily' for 'horizontally'), "
+    "interpret it as the operation, not as an object name.\n"
+    "- rotate, flip, blur and add_noise act on the whole current image by default, or on "
+    "just one object if you pass its bounding box as `box` [left, top, right, bottom]. "
+    "resize changes the whole image; crop extracts the given region.\n"
     "- Editing tools can be chained: each one operates on the result of the previous edit.\n"
-    "- When you are done, briefly tell the user what you detected or changed. Keep it concise."
+    "- To edit an object you must call TWO tools in order: first detect_objects to get "
+    "the box, then the edit tool (blur/flip/rotate/etc.) with that box. Calling only "
+    "detect_objects does NOT edit anything. You have not blurred/flipped/rotated anything "
+    "until you have called the actual edit tool in THIS turn. Never say an edit is done "
+    "based on detection alone or on a previous turn - the edit tool must run this turn.\n"
+    "- When you are done, briefly tell the user what you detected or changed. Keep it concise. "
+    "Reply with plain text only. Do NOT wrap your answer in <thinking>, <response>, or any "
+    "other tags - the user sees your reply directly."
+
 )
 
 # Per-request context: the uploaded image, the last YOLO prediction uid, and
@@ -117,7 +142,10 @@ def detect_objects() -> str:
             detail.raise_for_status()
             for obj in detail.json().get("detection_objects", []):
                 # Round to whole pixels: the edit tools take integer coordinates.
-                box = [round(c) for c in obj["box"]]
+                raw_box = obj["box"]
+                if isinstance(raw_box, str):
+                    raw_box = ast.literal_eval(raw_box)
+                box = [round(float(c)) for c in raw_box]
                 objects.append({"label": obj["label"], "score": obj["score"], "box": box})
 
     result["objects"] = objects
@@ -262,6 +290,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
     prediction_uid: Optional[str] = None
     processed_image_b64: Optional[str] = None
     tokens = {"input": 0, "output": 0, "total": 0}
+    edit_nudges = 0
 
     for i in range(1, max_iterations + 1):
         response: AIMessage = llm_with_tools.invoke(messages)
@@ -284,6 +313,22 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
                     block.get("text", "") for block in content
                     if isinstance(block, dict)
                 )
+
+            # Guard: the model sometimes claims an edit without calling the tool.
+            # If it says it edited but no image was produced, push it to do it.
+            claims_edit = any(
+                w in content.lower()
+                for w in ("blurred", "flipped", "rotated", "resized", "cropped", "noise")
+            )
+            if claims_edit and processed_image_b64 is None and edit_nudges < 1 and i < max_iterations:
+                edit_nudges += 1
+                messages.append(HumanMessage(content=(
+                    "You have NOT edited anything yet - you only detected. Do not call "
+                    "detect_objects again. Call the edit tool now (blur/crop/flip/rotate) "
+                    "and pass the target object's box. The box is already in the messages above."
+                )))
+                continue
+
             return AgentResult(
                 text=content,
                 iterations=i,
@@ -426,7 +471,11 @@ def chat(request: ChatRequest):
         elapsed = round(time.time() - start, 2)
 
         uid = result.prediction_uid
-        annotated = fetch_annotated_image(uid) if uid else None
+        # Only show the annotated (boxes) image when the user just detected things.
+        # If any edit tool ran, the edited result is what they want to see instead.
+        edit_tools = {"rotate", "flip", "blur", "resize", "crop", "add_noise"}
+        an_edit_ran = any(t in edit_tools for t in result.tools_called)
+        annotated = None if an_edit_ran else (fetch_annotated_image(uid) if uid else None)
 
         return ChatResponse(
             response=result.text,

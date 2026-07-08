@@ -18,32 +18,48 @@ def _encode(img: Image.Image) -> str:
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
+def _apply_to_region(img: Image.Image, box, transform) -> Image.Image:
+    """Crop `box`, run `transform` on just that region, paste it back."""
+    left, top, right, bottom = box
+    region = img.crop((left, top, right, bottom))
+    edited = transform(region)
+    # A region edit must fit back in the same slot (e.g. rotate can resize it).
+    if edited.size != region.size:
+        edited = edited.resize(region.size)
+    out = img.copy()
+    out.paste(edited, (left, top))
+    return out
 
 @mcp.tool()
-def rotate(image_b64: str, angle: float = 90.0) -> str:
-    """Rotate an image by a given angle. Returns base64-encoded PNG."""
-    img = _decode(image_b64).rotate(angle, expand=True)
-    return _encode(img)
-
-
-@mcp.tool()
-def flip(image_b64: str, direction: str = "horizontal") -> str:
-    """Flip an image horizontally or vertically."""
+def rotate(image_b64: str, angle: float = 90.0, box: list[int] | None = None) -> str:
+    """Rotate an image, or just the region `box` [left, top, right, bottom]. Returns base64 PNG."""
     img = _decode(image_b64)
+    fn = lambda im: im.rotate(-angle, expand=True)
+    result = _apply_to_region(img, box, fn) if box else fn(img)
+    return _encode(result)
+
+
+@mcp.tool()
+def flip(image_b64: str, direction: str = "horizontal", box: list[int] | None = None) -> str:
+    """Flip an image, or just the region `box`, horizontally or vertically."""
     if direction == "horizontal":
-        transformed = ImageOps.mirror(img)
+        fn = ImageOps.mirror
     elif direction == "vertical":
-        transformed = ImageOps.flip(img)
+        fn = ImageOps.flip
     else:
         raise ValueError("direction must be 'horizontal' or 'vertical'")
-    return _encode(transformed)
+    img = _decode(image_b64)
+    result = _apply_to_region(img, box, fn) if box else fn(img)
+    return _encode(result)
 
 
 @mcp.tool()
-def blur(image_b64: str, radius: float = 2.0) -> str:
-    """Apply Gaussian blur to an image. Returns base64-encoded PNG."""
-    img = _decode(image_b64).filter(ImageFilter.GaussianBlur(radius))
-    return _encode(img)
+def blur(image_b64: str, radius: float = 2.0, box: list[int] | None = None) -> str:
+    """Blur an image, or just the region `box` [left, top, right, bottom]."""
+    img = _decode(image_b64)
+    fn = lambda im: im.filter(ImageFilter.GaussianBlur(radius))
+    result = _apply_to_region(img, box, fn) if box else fn(img)
+    return _encode(result)
 
 
 @mcp.tool()
@@ -74,19 +90,22 @@ def paste(base_image_b64: str, patch_b64: str, left: int, top: int) -> str:
 
 
 @mcp.tool()
-def add_noise(image_b64: str, amount: float = 0.1) -> str:
-    """Add salt-and-pepper noise to an image."""
-    img = _decode(image_b64)
-    pixels = []
-    for pixel in img.getdata():
-        if random.random() < amount:
-            pixels.append((255, 255, 255) if random.random() < 0.5 else (0, 0, 0))
-        else:
-            pixels.append(pixel)
+def add_noise(image_b64: str, amount: float = 0.1, box: list[int] | None = None) -> str:
+    """Add salt-and-pepper noise to an image, or just the region `box` [left, top, right, bottom]."""
+    def fn(im: Image.Image) -> Image.Image:
+        pixels = []
+        for pixel in im.getdata():
+            if random.random() < amount:
+                pixels.append((255, 255, 255) if random.random() < 0.5 else (0, 0, 0))
+            else:
+                pixels.append(pixel)
+        noisy = Image.new("RGB", im.size)
+        noisy.putdata(pixels)
+        return noisy
 
-    noisy_img = Image.new("RGB", img.size)
-    noisy_img.putdata(pixels)
-    return _encode(noisy_img)
+    img = _decode(image_b64)
+    result = _apply_to_region(img, box, fn) if box else fn(img)
+    return _encode(result)
 
 
 if __name__ == "__main__":
