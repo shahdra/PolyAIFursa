@@ -18,20 +18,17 @@ services:
     container_name: agent
     ports:
       - "8000:8000"
+    # MODEL, AWS_*, ALLOWED_ORIGINS, GOOGLE_API_KEY/etc. come from this file -
+    # it's gitignored and lives on each instance (dev/prod) with real values;
+    # see services/agent/.env.example for the required keys.
+    env_file:
+      - ./services/agent/.env
     environment:
+      # Compose-network topology, not secrets - these hostnames only resolve
+      # inside this compose network, so they override whatever localhost
+      # values services/agent/.env has for running the agent outside Docker.
       YOLO_SERVICE_URL: http://yolo:8080
       IMG_PROC_MCP_URL: http://img-proc-mcp:9000/mcp
-      MODEL: bedrock:amazon.nova-lite-v1:0
-      AWS_REGION: us-east-1
-      AWS_S3_BUCKET: shahd-polyai-images
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      # CORS: must match the origin the browser actually loads the frontend
-      # from. Defaults to localhost for local dev; set in .env per instance
-      # (e.g. http://<DEV_INSTANCE_IP>:3000) so the deployed frontend isn't
-      # silently blocked by the browser with "Failed to fetch".
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
-
     depends_on:
       - yolo
       - img-proc-mcp
@@ -44,11 +41,10 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/yolo-service:${YOLO_IMAGE_TAG:-local}
     container_name: yolo
-    environment:
-      AWS_REGION: us-east-1
-      AWS_S3_BUCKET: shahd-polyai-images
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    # AWS_* comes from this file - gitignored, real values live on each
+    # instance; see services/yolo/.env.example for the required keys.
+    env_file:
+      - ./services/yolo/.env
     networks:
       - polyai-net
     # reached by agent and prometheus at yolo:8080
@@ -58,14 +54,12 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/img-proc-mcp-service:${IMG_PROC_IMAGE_TAG:-local}
     container_name: img-proc-mcp
-    environment:
-      # Edit tools read/write the working image via S3 keys instead of
-      # shipping base64 bytes in every MCP request/response - same bucket
-      # the agent uploads the original upload to.
-      AWS_REGION: us-east-1
-      AWS_S3_BUCKET: shahd-polyai-images
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    # Edit tools read/write the working image via S3 keys instead of shipping
+    # base64 bytes in every MCP request/response - same bucket the agent
+    # uploads the original upload to. AWS_* comes from this file - gitignored,
+    # real values live on each instance; see .env.example for required keys.
+    env_file:
+      - ./services/img-proc-mcp/.env
     networks:
       - polyai-net
     # reached by agent at img-proc-mcp:9000/mcp
