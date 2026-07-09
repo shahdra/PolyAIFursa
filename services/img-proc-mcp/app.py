@@ -1,22 +1,45 @@
 # services/img-proc-mcp/app.py
-import base64
 import io
+import json
+import os
 import random
 
+import boto3
 from fastmcp import FastMCP
 from PIL import Image, ImageFilter, ImageOps
 
 mcp = FastMCP("img-proc")
 
+S3_BUCKET = os.environ.get("AWS_S3_BUCKET", "")
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+s3_client = boto3.client("s3", region_name=AWS_REGION)
 
-def _decode(b64: str) -> Image.Image:
-    return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+
+def _image_id(s3_key: str) -> str:
+    """The turn's image id is the first path segment of any of its S3 keys
+    (e.g. "abc123/original/image.jpg" or "abc123/working.png" -> "abc123")."""
+    return s3_key.split("/", 1)[0]
 
 
-def _encode(img: Image.Image) -> str:
+def _download_from_s3(s3_key: str) -> Image.Image:
+    obj = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
+    return Image.open(io.BytesIO(obj["Body"].read())).convert("RGB")
+
+
+def _upload_to_s3(img: Image.Image, s3_key: str) -> str:
+    """Overwrite this turn's single working image (rather than minting a new
+    object per edit step) so a multi-step chain doesn't leave orphaned S3
+    objects behind. Returns the key that was written."""
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    key = f"{_image_id(s3_key)}/working.png"
+    s3_client.put_object(Bucket=S3_BUCKET, Key=key, Body=buf.getvalue(), ContentType="image/png")
+    return key
+
+
+def _result(img: Image.Image, s3_key: str) -> str:
+    return json.dumps({"s3_key": _upload_to_s3(img, s3_key)})
+
 
 def _apply_to_region(img: Image.Image, box, transform) -> Image.Image:
     """Crop `box`, run `transform` on just that region, paste it back."""
@@ -31,67 +54,72 @@ def _apply_to_region(img: Image.Image, box, transform) -> Image.Image:
     return out
 
 @mcp.tool()
-def rotate(image_b64: str, angle: float = 90.0, box: list[int] | None = None) -> str:
-    """Rotate an image, or just the region `box` [left, top, right, bottom]. Returns base64 PNG."""
-    img = _decode(image_b64)
+def rotate(s3_key: str, angle: float = 90.0, box: list[int] | None = None) -> str:
+    """Rotate the image at `s3_key`, or just the region `box` [left, top, right, bottom].
+    Returns JSON {"s3_key": <new key>}."""
+    img = _download_from_s3(s3_key)
     fn = lambda im: im.rotate(-angle, expand=True)
     result = _apply_to_region(img, box, fn) if box else fn(img)
-    return _encode(result)
+    return _result(result, s3_key)
 
 
 @mcp.tool()
-def flip(image_b64: str, direction: str = "horizontal", box: list[int] | None = None) -> str:
-    """Flip an image, or just the region `box`, horizontally or vertically."""
+def flip(s3_key: str, direction: str = "horizontal", box: list[int] | None = None) -> str:
+    """Flip the image at `s3_key`, or just the region `box`, horizontally or vertically.
+    Returns JSON {"s3_key": <new key>}."""
     if direction == "horizontal":
         fn = ImageOps.mirror
     elif direction == "vertical":
         fn = ImageOps.flip
     else:
         raise ValueError("direction must be 'horizontal' or 'vertical'")
-    img = _decode(image_b64)
+    img = _download_from_s3(s3_key)
     result = _apply_to_region(img, box, fn) if box else fn(img)
-    return _encode(result)
+    return _result(result, s3_key)
 
 
 @mcp.tool()
-def blur(image_b64: str, radius: float = 2.0, box: list[int] | None = None) -> str:
-    """Blur an image, or just the region `box` [left, top, right, bottom]."""
-    img = _decode(image_b64)
+def blur(s3_key: str, radius: float = 2.0, box: list[int] | None = None) -> str:
+    """Blur the image at `s3_key`, or just the region `box` [left, top, right, bottom].
+    Returns JSON {"s3_key": <new key>}."""
+    img = _download_from_s3(s3_key)
     fn = lambda im: im.filter(ImageFilter.GaussianBlur(radius))
     result = _apply_to_region(img, box, fn) if box else fn(img)
-    return _encode(result)
+    return _result(result, s3_key)
 
 
 @mcp.tool()
-def resize(image_b64: str, width: int, height: int) -> str:
-    """Resize an image to the given width and height."""
-    img = _decode(image_b64).resize((width, height))
-    return _encode(img)
+def resize(s3_key: str, width: int, height: int) -> str:
+    """Resize the image at `s3_key` to the given width and height. Returns JSON {"s3_key": <new key>}."""
+    img = _download_from_s3(s3_key).resize((width, height))
+    return _result(img, s3_key)
 
 
 @mcp.tool()
-def crop(image_b64: str, left: int, top: int, right: int, bottom: int) -> str:
-    """Crop an image using bounding-box coordinates."""
-    img = _decode(image_b64)
-    return _encode(img.crop((left, top, right, bottom)))
+def crop(s3_key: str, left: int, top: int, right: int, bottom: int) -> str:
+    """Crop the image at `s3_key` using bounding-box coordinates. Returns JSON {"s3_key": <new key>}."""
+    img = _download_from_s3(s3_key)
+    return _result(img.crop((left, top, right, bottom)), s3_key)
 
 
 @mcp.tool()
-def paste(base_image_b64: str, patch_b64: str, left: int, top: int) -> str:
-    """Paste a patch image onto a base image at the given top-left coordinates.
+def paste(base_s3_key: str, patch_s3_key: str, left: int, top: int) -> str:
+    """Paste the patch image at `patch_s3_key` onto the base image at `base_s3_key`,
+    at the given top-left coordinates. Returns JSON {"s3_key": <new key>}.
 
     Used to composite a transformed region (e.g. a blurred bounding-box crop)
     back into the full-size image it was cropped from.
     """
-    base = _decode(base_image_b64)
-    patch = _decode(patch_b64)
+    base = _download_from_s3(base_s3_key)
+    patch = _download_from_s3(patch_s3_key)
     base.paste(patch, (left, top))
-    return _encode(base)
+    return _result(base, base_s3_key)
 
 
 @mcp.tool()
-def add_noise(image_b64: str, amount: float = 0.1, box: list[int] | None = None) -> str:
-    """Add salt-and-pepper noise to an image, or just the region `box` [left, top, right, bottom]."""
+def add_noise(s3_key: str, amount: float = 0.1, box: list[int] | None = None) -> str:
+    """Add salt-and-pepper noise to the image at `s3_key`, or just the region `box`
+    [left, top, right, bottom]. Returns JSON {"s3_key": <new key>}."""
     def fn(im: Image.Image) -> Image.Image:
         pixels = []
         for pixel in im.getdata():
@@ -103,9 +131,9 @@ def add_noise(image_b64: str, amount: float = 0.1, box: list[int] | None = None)
         noisy.putdata(pixels)
         return noisy
 
-    img = _decode(image_b64)
+    img = _download_from_s3(s3_key)
     result = _apply_to_region(img, box, fn) if box else fn(img)
-    return _encode(result)
+    return _result(result, s3_key)
 
 
 if __name__ == "__main__":
