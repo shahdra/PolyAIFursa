@@ -4,6 +4,11 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/frontend-service:${FRONTEND_IMAGE_TAG:-local}
     container_name: frontend
+    # Bring the stack back up automatically after an EC2 stop/start or reboot
+    # (Docker's own restart policy default is "no" - containers stay Exited
+    # otherwise). "unless-stopped" restarts on daemon startup/crash but won't
+    # fight a deliberate `docker compose stop`.
+    restart: unless-stopped
     ports:
       - "3000:3000"              # frontend owns host 3000 (open this in the browser)
     depends_on:
@@ -16,6 +21,7 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/agent-service:${AGENT_IMAGE_TAG:-local}
     container_name: agent
+    restart: unless-stopped
     ports:
       - "8000:8000"
     # MODEL, AWS_*, ALLOWED_ORIGINS, GOOGLE_API_KEY/etc. come from this file -
@@ -41,6 +47,7 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/yolo-service:${YOLO_IMAGE_TAG:-local}
     container_name: yolo
+    restart: unless-stopped
     # AWS_* comes from this file - gitignored, real values live on each
     # instance; see services/yolo/.env.example for the required keys.
     env_file:
@@ -54,6 +61,7 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/img-proc-mcp-service:${IMG_PROC_IMAGE_TAG:-local}
     container_name: img-proc-mcp
+    restart: unless-stopped
     # Edit tools read/write the working image via S3 keys instead of shipping
     # base64 bytes in every MCP request/response - same bucket the agent
     # uploads the original upload to. AWS_* comes from this file - gitignored,
@@ -71,6 +79,7 @@ services:
   node-exporter:
     image: prom/node-exporter
     container_name: node-exporter
+    restart: unless-stopped
     command:
       # Tell node-exporter where to find the *host's* /proc, /sys, / inside
       # the container, since we mount them under /host/* below instead of
@@ -95,6 +104,7 @@ services:
   prometheus:
     image: prom/prometheus
     container_name: prometheus
+    restart: unless-stopped
     ports:
       - "9090:9090"
     volumes:
@@ -107,6 +117,7 @@ services:
   grafana:
     image: grafana/grafana
     container_name: grafana
+    restart: unless-stopped
     ports:
       - "3001:3000"              # moved off 3000 to avoid clashing with frontend
     volumes:
