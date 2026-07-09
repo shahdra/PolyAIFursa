@@ -58,6 +58,14 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/img-proc-mcp-service:${IMG_PROC_IMAGE_TAG:-local}
     container_name: img-proc-mcp
+    environment:
+      # Edit tools read/write the working image via S3 keys instead of
+      # shipping base64 bytes in every MCP request/response - same bucket
+      # the agent uploads the original upload to.
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: shahd-polyai-images
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     networks:
       - polyai-net
     # reached by agent at img-proc-mcp:9000/mcp

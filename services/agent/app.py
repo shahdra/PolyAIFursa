@@ -102,32 +102,25 @@ SYSTEM_PROMPT = (
 
 )
 
-# Per-request context: the uploaded image, the last YOLO prediction uid, and
-# which tools were called. These flow AROUND the LLM (the model never sees image data).
+# Per-request context: the working image's S3 key, the last YOLO prediction
+# uid, and which tools were called. These flow AROUND the LLM (the model
+# never sees image data - only ever a small S3 key string).
 S3_BUCKET = os.environ.get("AWS_S3_BUCKET", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 s3_client = boto3.client("s3", region_name=AWS_REGION)
-_current_image_b64: ContextVar[Optional[str]] = ContextVar("current_image_b64", default=None)
+# The current turn's working image, addressed by S3 key. Starts as the
+# original upload (uploaded once in /chat, see below) and gets repointed at
+# each edit tool's output as a chain of edits runs.
+_current_s3_key: ContextVar[Optional[str]] = ContextVar("current_s3_key", default=None)
 _tools_called: ContextVar[list] = ContextVar("tools_called", default=[])
 
 
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
-    image_b64 = _current_image_b64.get()
-    if not image_b64:
+    s3_key = _current_s3_key.get()
+    if not s3_key:
         return json.dumps({"error": "No image was provided by the user."})
-    image_bytes = base64.b64decode(image_b64)
-
-    # Upload the original image to S3 and pass only the key to Yolo.
-    image_id = str(uuid.uuid4())
-    s3_key = f"{image_id}/original/image.jpg"
-    s3_client.put_object(
-        Bucket=S3_BUCKET,
-        Key=s3_key,
-        Body=image_bytes,
-        ContentType="image/jpeg",
-    )
 
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
@@ -165,10 +158,10 @@ mcp_client = MultiServerMCPClient(
 )
 try:
     discovered = asyncio.run(mcp_client.get_tools())
-    # Keep the single-image editing tools (those that take an `image_b64`
+    # Keep the single-image editing tools (those that take an `s3_key`
     # argument). Multi-image tools such as `paste` don't fit the "inject one
     # working image" model, so they are left out of the agent's toolset.
-    mcp_image_tools = [t for t in discovered if "image_b64" in t.args]
+    mcp_image_tools = [t for t in discovered if "s3_key" in t.args]
     logging.info(
         "Discovered %d image tools over MCP from %s: %s",
         len(mcp_image_tools), IMG_PROC_MCP_URL, [t.name for t in mcp_image_tools],
@@ -181,12 +174,12 @@ except Exception as e:
     )
     mcp_image_tools = []
 
-# The MCP image tools all take the working image as an `image_b64` argument. The
+# The MCP image tools all take the working image as an `s3_key` argument. The
 # model never sees or supplies image data, so we hide that argument from it (see
-# _llm_facing_tools below) and inject the image ourselves at call time (see
+# _llm_facing_tools below) and inject the key ourselves at call time (see
 # run_agent). These are the tool names and argument names that get that treatment.
 MCP_IMAGE_TOOL_NAMES = {t.name for t in mcp_image_tools}
-IMAGE_ARG_NAMES = {"image_b64"}
+IMAGE_ARG_NAMES = {"s3_key"}
 
 # Registry: map tool name -> tool object (local tools + MCP-discovered tools).
 TOOLS = {detect_objects.name: detect_objects}
@@ -194,22 +187,26 @@ for _mcp_tool in mcp_image_tools:
     TOOLS[_mcp_tool.name] = _mcp_tool
 
 
-def _extract_image(tool_message: ToolMessage) -> Optional[str]:
-    """Pull the base64 PNG string out of an MCP tool's result message."""
+def _extract_s3_key(tool_message: ToolMessage) -> Optional[str]:
+    """Pull the new S3 key out of an MCP tool's JSON result."""
     content = tool_message.content
-    if isinstance(content, str):
-        return content or None
     if isinstance(content, list):
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
-                return block["text"]
-    return None
+                content = block["text"]
+                break
+    if not isinstance(content, str) or not content:
+        return None
+    try:
+        return json.loads(content).get("s3_key")
+    except json.JSONDecodeError:
+        return None
 
 
 def _llm_facing_tools() -> list:
     """
     Build the tool list shown to the model: the local tools as-is, plus each
-    MCP image tool with its `image_b64` argument stripped out. The model only
+    MCP image tool with its `s3_key` argument stripped out. The model only
     chooses the operation and its parameters; the image is injected in run_agent,
     so image bytes never enter (or leave) the model's context.
     """
@@ -276,7 +273,7 @@ class AgentResult(BaseModel):
     iterations: int
     tools_called: list[str]
     prediction_uid: Optional[str] = None
-    processed_image_b64: Optional[str] = None
+    processed_s3_key: Optional[str] = None
     tokens_used: dict = {"input": 0, "output": 0, "total": 0}
     context_limit_exceeded: bool = False
 
@@ -292,7 +289,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + history
     tools_called: list[str] = []
     prediction_uid: Optional[str] = None
-    processed_image_b64: Optional[str] = None
+    processed_s3_key: Optional[str] = None
     tokens = {"input": 0, "output": 0, "total": 0}
     edit_nudges = 0
     empty_nudges = 0
@@ -325,7 +322,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
                 w in content.lower()
                 for w in ("blurred", "flipped", "rotated", "resized", "cropped", "noise")
             )
-            if claims_edit and processed_image_b64 is None and edit_nudges < 1 and i < max_iterations:
+            if claims_edit and processed_s3_key is None and edit_nudges < 1 and i < max_iterations:
                 edit_nudges += 1
                 messages.append(HumanMessage(content=(
                     "You have NOT edited anything yet - you only detected. Do not call "
@@ -351,7 +348,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
                 iterations=i,
                 tools_called=tools_called,
                 prediction_uid=prediction_uid,
-                processed_image_b64=processed_image_b64,
+                processed_s3_key=processed_s3_key,
                 tokens_used=tokens,
             )
 
@@ -363,17 +360,17 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
 
             if name in MCP_IMAGE_TOOL_NAMES:
                 # Image-editing tool discovered over MCP. Inject the current
-                # working image (the model never provides it), run it, then keep
-                # the resulting image OUT of the model's context.
-                working_image = _current_image_b64.get()
-                if not working_image:
+                # working image's S3 key (the model never provides it), run it,
+                # then keep the resulting key OUT of the model's context.
+                working_key = _current_s3_key.get()
+                if not working_key:
                     messages.append(ToolMessage(
                         content=json.dumps({"error": "No image was provided by the user."}),
                         tool_call_id=tool_call["id"],
                     ))
                     continue
 
-                call = {**tool_call, "args": {**tool_call["args"], "image_b64": working_image}}
+                call = {**tool_call, "args": {**tool_call["args"], "s3_key": working_key}}
                 # MCP tools are async-only; run the coroutine to completion here.
                 tool_result = asyncio.run(tool_fn.ainvoke(call))   # returns a ToolMessage
 
@@ -382,13 +379,13 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
                     messages.append(tool_result)
                     continue
 
-                new_image = _extract_image(tool_result)
-                if new_image:
-                    processed_image_b64 = new_image
+                new_key = _extract_s3_key(tool_result)
+                if new_key:
+                    processed_s3_key = new_key
                     # Chain: the next edit operates on this result.
-                    _current_image_b64.set(new_image)
+                    _current_s3_key.set(new_key)
 
-                # Redact: the model gets a short confirmation, never image bytes.
+                # Redact: the model gets a short confirmation, never the S3 key.
                 tool_result.content = json.dumps({"status": "ok", "operation": name})
                 tool_result.artifact = None
                 messages.append(tool_result)
@@ -411,10 +408,23 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
         iterations=max_iterations,
         tools_called=tools_called,
         prediction_uid=prediction_uid,
-        processed_image_b64=processed_image_b64,
+        processed_s3_key=processed_s3_key,
         tokens_used=tokens,
         context_limit_exceeded=True,
     )
+
+
+def _fetch_processed_image_b64(s3_key: str) -> Optional[str]:
+    """Download the final edited image from S3 and base64-encode it - the only
+    place base64 image bytes exist on the agent side, at the boundary with
+    the frontend. Every internal hop (MCP tool calls, tool results) only ever
+    carries the small S3 key string."""
+    try:
+        obj = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
+        return base64.b64encode(obj["Body"].read()).decode("utf-8")
+    except Exception as e:
+        logging.warning(f"Could not fetch processed image {s3_key} from S3: {e}")
+        return None
 
 
 def fetch_annotated_image(uid: str) -> Optional[str]:
@@ -484,7 +494,22 @@ def chat(request: ChatRequest):
         else:
             lc_messages.append(AIMessage(content=msg.content))
 
-    image_token = _current_image_b64.set(latest_image)
+    # Upload the user's image to S3 once per turn - regardless of which tools
+    # end up running - and hand every tool (detect_objects, MCP edit tools)
+    # only the S3 key from here on. Mirrors how detect_objects already talks
+    # to Yolo by key instead of by value.
+    s3_key = None
+    if latest_image:
+        image_id = str(uuid.uuid4())
+        s3_key = f"{image_id}/original/image.jpg"
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=s3_key,
+            Body=base64.b64decode(latest_image),
+            ContentType="image/jpeg",
+        )
+
+    key_token = _current_s3_key.set(s3_key)
     try:
         start = time.time()
         result = run_agent(lc_messages)
@@ -497,11 +522,16 @@ def chat(request: ChatRequest):
         an_edit_ran = any(t in edit_tools for t in result.tools_called)
         annotated = None if an_edit_ran else (fetch_annotated_image(uid) if uid else None)
 
+        processed_image_b64 = (
+            _fetch_processed_image_b64(result.processed_s3_key)
+            if result.processed_s3_key else None
+        )
+
         return ChatResponse(
             response=result.text,
             prediction_id=uid,
             annotated_image=annotated,
-            processed_image=result.processed_image_b64,
+            processed_image=processed_image_b64,
             agent_loop_time_s=elapsed,
             iterations=result.iterations,
             tools_called=result.tools_called,
@@ -509,7 +539,7 @@ def chat(request: ChatRequest):
             context_limit_exceeded=result.context_limit_exceeded,
         )
     finally:
-        _current_image_b64.reset(image_token)
+        _current_s3_key.reset(key_token)
 
 @app.get("/health")
 def health():
