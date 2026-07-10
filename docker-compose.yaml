@@ -8,7 +8,7 @@ services:
     # (Docker's own restart policy default is "no" - containers stay Exited
     # otherwise). "unless-stopped" restarts on daemon startup/crash but won't
     # fight a deliberate `docker compose stop`.
-    restart: unless-stopped
+    restart: unless-stopped 
     ports:
       - "3000:3000"              # frontend owns host 3000 (open this in the browser)
     depends_on:
@@ -35,6 +35,12 @@ services:
       # values services/agent/.env has for running the agent outside Docker.
       YOLO_SERVICE_URL: http://yolo:8080
       IMG_PROC_MCP_URL: http://img-proc-mcp:9000/mcp
+      # CORS: must match the origin the browser actually loads the frontend
+      # from. CI's deploy step exports ALLOWED_ORIGINS into the shell before
+      # calling `docker compose up -d agent` (see build-agent.yaml) - Compose
+      # substitution reads that directly, no .env file involved. Falls back
+      # to localhost so a bare `docker compose up` still works for local dev.
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000} # 
     depends_on:
       - yolo
       - img-proc-mcp

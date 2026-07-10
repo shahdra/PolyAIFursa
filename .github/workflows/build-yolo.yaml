@@ -48,23 +48,11 @@ jobs:
           host: ${{ secrets.DEV_INSTANCE_IP }}
           username: ubuntu
           key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
-          # YOLO_IMAGE_TAG is read inline by docker-compose.yaml's
-          # ${YOLO_IMAGE_TAG:-local} substitution on the remote host.
           envs: YOLO_IMAGE_TAG
           script: |
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B dev origin/dev
-            # Persist this service's tag into the root .env (gitignored, survives
-            # git checkout) instead of only exporting it for this SSH session -
-            # otherwise a later scoped deploy of a DIFFERENT service, or a bare
-            # `docker compose up -d`, would fall back to this stale/unpublished
-            # tag via depends_on. Upsert: drop any existing YOLO_IMAGE_TAG line,
-            # then append the current one.
-            touch .env
-            grep -v '^YOLO_IMAGE_TAG=' .env > .env.tmp || true
-            echo "YOLO_IMAGE_TAG=$YOLO_IMAGE_TAG" >> .env.tmp
-            mv .env.tmp .env
             docker compose up -d yolo
         env:
           YOLO_IMAGE_TAG: ${{ github.sha }}
@@ -85,12 +73,6 @@ jobs:
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B main origin/main
-            # See deploy-dev above: persist into .env so it doesn't go stale for
-            # other services' scoped deploys or a bare `docker compose up -d`.
-            touch .env
-            grep -v '^YOLO_IMAGE_TAG=' .env > .env.tmp || true
-            echo "YOLO_IMAGE_TAG=$YOLO_IMAGE_TAG" >> .env.tmp
-            mv .env.tmp .env
             docker compose up -d yolo
         env:
           YOLO_IMAGE_TAG: ${{ github.sha }}
