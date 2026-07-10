@@ -58,6 +58,9 @@ jobs:
             git fetch origin
             git checkout -B dev origin/dev
             docker compose up -d agent
+            # Old container is already replaced above, so its image is now
+            # unreferenced - safe to reclaim disk before it fills up.
+            docker image prune -af
         env:
           AGENT_IMAGE_TAG: ${{ github.sha }}
           ALLOWED_ORIGINS: http://${{ secrets.DEV_INSTANCE_IP }}:3000
@@ -79,6 +82,7 @@ jobs:
             git fetch origin
             git checkout -B main origin/main
             docker compose up -d agent
+            docker image prune -af
         env:
           AGENT_IMAGE_TAG: ${{ github.sha }}
           ALLOWED_ORIGINS: http://${{ secrets.PROD_INSTANCE_IP }}:3000
