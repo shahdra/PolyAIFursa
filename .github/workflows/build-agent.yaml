@@ -52,32 +52,11 @@ jobs:
           host: ${{ secrets.DEV_INSTANCE_IP }}
           username: ubuntu
           key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
-          # AGENT_IMAGE_TAG is read inline by docker-compose.yaml's
-          # ${AGENT_IMAGE_TAG:-local} substitution on the remote host.
-          envs: AGENT_IMAGE_TAG,ALLOWED_ORIGINS
+          envs: AGENT_IMAGE_TAG,ALLOWED_ORIGINS # exports these into the SSH session's shell for Compose to read
           script: |
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B dev origin/dev
-            # AGENT_IMAGE_TAG is compose-substitution config (goes in the
-            # root .env, gitignored, survives git checkout) - it's read by
-            # docker-compose.yaml's `image:` line, not by the container
-            # itself. Upsert: drop any existing line, then append the current
-            # one, so a later scoped deploy of a DIFFERENT service (or a bare
-            # `docker compose up -d`) doesn't fall back to a stale tag.
-            touch .env
-            grep -v '^AGENT_IMAGE_TAG=' .env > .env.tmp || true
-            echo "AGENT_IMAGE_TAG=$AGENT_IMAGE_TAG" >> .env.tmp
-            mv .env.tmp .env
-            # ALLOWED_ORIGINS is a real container env var for the agent, read
-            # via env_file from services/agent/.env (not the root .env, which
-            # only holds compose-substitution image tags now). Same upsert
-            # pattern so it doesn't revert to localhost and break the
-            # deployed frontend with CORS "Failed to fetch".
-            touch services/agent/.env
-            grep -v '^ALLOWED_ORIGINS=' services/agent/.env > services/agent/.env.tmp || true
-            echo "ALLOWED_ORIGINS=$ALLOWED_ORIGINS" >> services/agent/.env.tmp
-            mv services/agent/.env.tmp services/agent/.env
             docker compose up -d agent
         env:
           AGENT_IMAGE_TAG: ${{ github.sha }}
@@ -99,19 +78,6 @@ jobs:
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B main origin/main
-            # See deploy-dev above: image tag goes in the root .env (compose
-            # substitution), ALLOWED_ORIGINS goes in services/agent/.env
-            # (real container env var, loaded via env_file) - so neither goes
-            # stale for other services' scoped deploys or a bare
-            # `docker compose up -d`.
-            touch .env
-            grep -v '^AGENT_IMAGE_TAG=' .env > .env.tmp || true
-            echo "AGENT_IMAGE_TAG=$AGENT_IMAGE_TAG" >> .env.tmp
-            mv .env.tmp .env
-            touch services/agent/.env
-            grep -v '^ALLOWED_ORIGINS=' services/agent/.env > services/agent/.env.tmp || true
-            echo "ALLOWED_ORIGINS=$ALLOWED_ORIGINS" >> services/agent/.env.tmp
-            mv services/agent/.env.tmp services/agent/.env
             docker compose up -d agent
         env:
           AGENT_IMAGE_TAG: ${{ github.sha }}

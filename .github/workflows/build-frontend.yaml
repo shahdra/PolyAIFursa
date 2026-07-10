@@ -42,8 +42,9 @@ jobs:
           context: services/frontend
           push: true
           # Bake in the dev instance's own agent URL at build time.
+          # the frontend uses this to know wher to send requests, for the agent in the dev instance 
           build-args: |
-            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:8000
+            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:8000 
           # -dev suffix (not just the bare sha) so this can never collide with
           # a -prod build of the same commit that bakes in a different URL.
           tags: shahdra/frontend-service:${{ github.sha }}-dev
@@ -65,6 +66,7 @@ jobs:
         with:
           context: services/frontend
           push: true
+          # the frontend uses this to know wher to send requests, for the agent in the prod instance 
           build-args: |
             NEXT_PUBLIC_AGENT_URL=http://${{ secrets.PROD_INSTANCE_IP }}:8000
           tags: shahdra/frontend-service:${{ github.sha }}-prod
@@ -83,23 +85,11 @@ jobs:
           host: ${{ secrets.DEV_INSTANCE_IP }}
           username: ubuntu
           key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
-          # FRONTEND_IMAGE_TAG is read inline by docker-compose.yaml's
-          # ${FRONTEND_IMAGE_TAG:-local} substitution on the remote host.
           envs: FRONTEND_IMAGE_TAG
           script: |
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B dev origin/dev
-            # Persist this service's tag into the root .env (gitignored, survives
-            # git checkout) instead of only exporting it for this SSH session -
-            # otherwise a later scoped deploy of a DIFFERENT service, or a bare
-            # `docker compose up -d`, would fall back to this stale/unpublished
-            # tag via depends_on. Upsert: drop any existing FRONTEND_IMAGE_TAG
-            # line, then append the current one.
-            touch .env
-            grep -v '^FRONTEND_IMAGE_TAG=' .env > .env.tmp || true
-            echo "FRONTEND_IMAGE_TAG=$FRONTEND_IMAGE_TAG" >> .env.tmp
-            mv .env.tmp .env
             docker compose up -d frontend
         env:
           FRONTEND_IMAGE_TAG: ${{ github.sha }}-dev
@@ -120,12 +110,6 @@ jobs:
             cd ~/PolyAIFursa
             git fetch origin
             git checkout -B main origin/main
-            # See deploy-dev above: persist into .env so it doesn't go stale for
-            # other services' scoped deploys or a bare `docker compose up -d`.
-            touch .env
-            grep -v '^FRONTEND_IMAGE_TAG=' .env > .env.tmp || true
-            echo "FRONTEND_IMAGE_TAG=$FRONTEND_IMAGE_TAG" >> .env.tmp
-            mv .env.tmp .env
             docker compose up -d frontend
         env:
           FRONTEND_IMAGE_TAG: ${{ github.sha }}-prod
