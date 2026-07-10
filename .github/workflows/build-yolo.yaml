@@ -54,6 +54,9 @@ jobs:
             git fetch origin
             git checkout -B dev origin/dev
             docker compose up -d yolo
+            # Old container is already replaced above, so its image is now
+            # unreferenced - safe to reclaim disk before it fills up.
+            docker image prune -af
         env:
           YOLO_IMAGE_TAG: ${{ github.sha }}
 
@@ -74,5 +77,6 @@ jobs:
             git fetch origin
             git checkout -B main origin/main
             docker compose up -d yolo
+            docker image prune -af
         env:
           YOLO_IMAGE_TAG: ${{ github.sha }}
