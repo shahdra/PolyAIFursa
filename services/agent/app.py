@@ -25,9 +25,10 @@ import boto3
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-# Auto-instruments FastAPI (request count/latency/etc.) and serves it at
-# GET /metrics in Prometheus text format, so Prometheus can scrape the agent
-# the same way it already scrapes the yolo service.
+# Task 4 - Part II: Observability. This library adds a GET /metrics
+# endpoint to the app automatically, listing things like request count and
+# response time in the format Prometheus expects - the same way Yolo
+# already exposes its own /metrics.
 from prometheus_fastapi_instrumentator import Instrumentator
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -105,20 +106,20 @@ SYSTEM_PROMPT = (
 # Per-request context: the working image's S3 key, the last YOLO prediction
 # uid, and which tools were called. These flow AROUND the LLM (the model
 # never sees image data - only ever a small S3 key string).
-S3_BUCKET = os.environ.get("AWS_S3_BUCKET", "")
+S3_BUCKET = os.environ.get("AWS_S3_BUCKET", "") # The S3 bucket name where images are stored. This is read from the environment variable AWS_S3_BUCKET, or defaults to an empty string if not set.  
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-s3_client = boto3.client("s3", region_name=AWS_REGION)
+s3_client = boto3.client("s3", region_name=AWS_REGION) # A client for interacting with S3.
 # The current turn's working image, addressed by S3 key. Starts as the
 # original upload (uploaded once in /chat, see below) and gets repointed at
 # each edit tool's output as a chain of edits runs.
-_current_s3_key: ContextVar[Optional[str]] = ContextVar("current_s3_key", default=None)
+_current_s3_key: ContextVar[Optional[str]] = ContextVar("current_s3_key", default=None) # The S3 key of the current working image for this turn. This is a context variable that can be set and retrieved within the current execution context. It starts as None by default, meaning no image has been uploaded yet. When an image is uploaded, this variable is set to the S3 key of that image, and it gets updated as edits are made to the image.
 _tools_called: ContextVar[list] = ContextVar("tools_called", default=[])
 
 
 @tool
 def detect_objects() -> str:
     """Detect and identify objects in the image provided by the user using YOLO object detection."""
-    s3_key = _current_s3_key.get()
+    s3_key = _current_s3_key.get() # Get the current working image's S3 key from the context variable. This is the S3 key of the image that was uploaded by the user or produced by a previous edit tool in this turn. If no image has been uploaded yet, this will be None.    
     if not s3_key:
         return json.dumps({"error": "No image was provided by the user."})
 
@@ -149,15 +150,22 @@ def detect_objects() -> str:
     return json.dumps(result)
 
 
-# --- Image-processing tools (discovered over MCP) ---
-# The image-processing tools (rotate, flip, blur, resize, crop, add_noise) are
-# NOT defined here as local @tool functions; they are discovered from the
-# img-proc MCP server over HTTP and combined with the local tools at startup.
+# --- Task 4 - Part I: Image-processing tools (discovered over MCP) ---
+# The image-editing tools (rotate, flip, blur, resize, crop, add_noise) don't
+# live in this file at all - they're defined in the separate img-proc-mcp
+# service (services/img-proc-mcp/app.py). On startup, the agent connects to
+# that service over HTTP and asks it "what tools do you have?" (MCP =
+# Model Context Protocol). Whatever it lists gets added to the agent's
+# toolbox alongside the local tools defined above, so the model can call
+# them exactly like any other tool.
+
+# here the MultiServerMCPClient is initialized with the URL of the img-proc-mcp service. It will be used to discover the image-editing tools available from that service.
+# at the end the mcp_client.get_tools() method is called to fetch the list of tools from the img-proc-mcp service. The discovered tools are filtered to keep only those that take an s3_key argument, which indicates they operate on a single image. These tools are then added to the agent's toolbox for use in the run_agent function.
 mcp_client = MultiServerMCPClient(
     {"img_proc": {"url": IMG_PROC_MCP_URL, "transport": "streamable_http"}}
 )
 try:
-    discovered = asyncio.run(mcp_client.get_tools())
+    discovered = asyncio.run(mcp_client.get_tools()) # the handshake with the img-proc-mcp service happens here. The get_tools() method sends a request to the img-proc-mcp service asking for its list of available tools. The response is a list of tool definitions, which are then filtered to keep only those that take an s3_key argument (indicating they operate on a single image). These tools are added to the agent's toolbox for use in the run_agent function.
     # Keep the single-image editing tools (those that take an `s3_key`
     # argument). Multi-image tools such as `paste` don't fit the "inject one
     # working image" model, so they are left out of the agent's toolset.
@@ -265,8 +273,8 @@ else:
         f"Skipping capability check."
     )
 
+# Bind the discovered image-editing tools to the LLM as "here what you can call" 
 llm_with_tools = llm.bind_tools(_llm_facing_tools())
-
 
 class AgentResult(BaseModel):
     text: str
@@ -293,10 +301,11 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
     tokens = {"input": 0, "output": 0, "total": 0}
     edit_nudges = 0
     empty_nudges = 0
+    detect_ran = False   # detect_objects already succeeded this turn
 
     for i in range(1, max_iterations + 1):
-        response: AIMessage = llm_with_tools.invoke(messages)
-        messages.append(response)
+        response: AIMessage = llm_with_tools.invoke(messages) # Send the current conversation history (messages) to the LLM with tools bound. The LLM processes the messages and returns a response, which may include tool calls or plain text. The response is an AIMessage object that contains the model's output, including any tool calls it wants to make.
+        messages.append(response) 
         # Accumulate token usage from this LLM call
         usage = getattr(response, "usage_metadata", None) or {}
         tokens["input"] += usage.get("input_tokens", 0)
@@ -362,7 +371,7 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
                 # Image-editing tool discovered over MCP. Inject the current
                 # working image's S3 key (the model never provides it), run it,
                 # then keep the resulting key OUT of the model's context.
-                working_key = _current_s3_key.get()
+                working_key = _current_s3_key.get() # working_key is the S3 key of the current working image for this turn. This is the image that was uploaded by the user or produced by a previous edit tool in this turn. If no image has been uploaded yet, this will be None. 
                 if not working_key:
                     messages.append(ToolMessage(
                         content=json.dumps({"error": "No image was provided by the user."}),
@@ -370,25 +379,41 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
                     ))
                     continue
 
-                call = {**tool_call, "args": {**tool_call["args"], "s3_key": working_key}}
+                call = {**tool_call, "args": {**tool_call["args"], "s3_key": working_key}} # calling the MCP image tool with the current working image's S3 key injected into the arguments. The `
+                # This allows the tool to operate on the correct image without exposing image data to the model.
                 # MCP tools are async-only; run the coroutine to completion here.
-                tool_result = asyncio.run(tool_fn.ainvoke(call))   # returns a ToolMessage
+                tool_result = asyncio.run(tool_fn.ainvoke(call))   # the result of the MCP tool call, its contains the new S3 key of the edited image if the tool succeeded
 
                 if getattr(tool_result, "status", "success") == "error":
                     # Let the model see the error text so it can recover.
                     messages.append(tool_result)
                     continue
 
-                new_key = _extract_s3_key(tool_result)
+                new_key = _extract_s3_key(tool_result) # extract the new S3 key from the tool's JSON result. This is the S3 key of the edited image produced by the MCP tool. If the tool succeeded, this will be a valid S3 key; if it failed, this will be None.
                 if new_key:
-                    processed_s3_key = new_key
+                    processed_s3_key = new_key # the final processed image's S3 key for this turn. This is the S3 key of the last edited image produced by the MCP tool. It will be returned to the user in the AgentResult at the end of the run_agent function.
                     # Chain: the next edit operates on this result.
-                    _current_s3_key.set(new_key)
+                    _current_s3_key.set(new_key) # update the context variable to point to the new working image's S3 key. This allows subsequent tool calls in this turn to operate on the latest edited image without exposing image data to the model.
 
                 # Redact: the model gets a short confirmation, never the S3 key.
-                tool_result.content = json.dumps({"status": "ok", "operation": name})
+                tool_result.content = json.dumps({"status": "ok", "operation": name}) # the model only sees a confirmation that the operation succeeded, not the S3 key of the edited image. This prevents the model from seeing or exposing image data.
                 tool_result.artifact = None
                 messages.append(tool_result)
+                continue
+            # Guard: weaker models tend to call detect_objects over and over
+            # instead of acting on the result, burning every iteration until the
+            # loop cap. Detection is idempotent within a turn, so once it has run
+            # we skip the redundant YOLO call and steer the model to proceed.
+            if name == "detect_objects" and detect_ran:
+                messages.append(ToolMessage(
+                    content=json.dumps({
+                        "note": "detect_objects already ran this turn. The detected "
+                                "objects and their boxes are in the earlier tool result "
+                                "above. Do NOT call detect_objects again - use those boxes "
+                                "to call an edit tool, or answer the user in plain text."
+                    }),
+                    tool_call_id=tool_call["id"],
+                ))
                 continue
 
             tool_result = tool_fn.invoke(tool_call)          # local tool -> ToolMessage
@@ -402,6 +427,9 @@ def run_agent(history: list, max_iterations: int = 10) -> AgentResult:
             except (json.JSONDecodeError, AttributeError):
                 pass
 
+            if name == "detect_objects":
+                detect_ran = True
+                
     # Hit the iteration cap without a final answer
     return AgentResult(
         text="I couldn't complete the request within the allowed number of steps.",
@@ -440,8 +468,8 @@ def fetch_annotated_image(uid: str) -> Optional[str]:
 
 
 app = FastAPI(title="Vision Agent")
-# Wire up the /metrics endpoint (mirrors services/yolo/app.py) so this
-# service shows up as a Prometheus scrape target at agent:8000/metrics.
+# Task 4 - Part II: Observability. Adds the GET /metrics endpoint so
+# Prometheus can scrape this service at agent:8000/metrics, same as Yolo.
 Instrumentator().instrument(app).expose(app)
 
 ALLOWED_ORIGINS = os.environ.get(
@@ -480,7 +508,7 @@ class ChatResponse(BaseModel):
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
-    lc_messages = []
+    lc_messages = [] # The messages to send to the LLM, converted from the ChatRequest format to the internal HumanMessage/AIMessage format.
     latest_image = None
 
     for msg in request.messages:
@@ -490,7 +518,7 @@ def chat(request: ChatRequest):
                 content = msg.content + "\n[An image was uploaded. Use existing tools to analyze it according to user instructions.]"
             else:
                 content = msg.content
-            lc_messages.append(HumanMessage(content=content))
+            lc_messages.append(HumanMessage(content=content)) # lc_messages is a list of HumanMessage and AIMessage objects that will be sent to the LLM. Each user message is converted to a HumanMessage, and if it contains an image, a note is appended to the content indicating that an image was uploaded.
         else:
             lc_messages.append(AIMessage(content=msg.content))
 
@@ -498,10 +526,12 @@ def chat(request: ChatRequest):
     # end up running - and hand every tool (detect_objects, MCP edit tools)
     # only the S3 key from here on. Mirrors how detect_objects already talks
     # to Yolo by key instead of by value.
-    s3_key = None
-    if latest_image:
-        image_id = str(uuid.uuid4())
-        s3_key = f"{image_id}/original/image.jpg"
+    s3_key = None # The S3 key of the uploaded image, if any. This is the "working" image for this turn.
+    if latest_image: # The user uploaded an image in this turn, so upload it to S3 and set the working key.
+        image_id = str(uuid.uuid4()) # A unique ID for this image, used as the first path segment in S3 keys.
+        s3_key = f"{image_id}/original/image.jpg" # The S3 key under which the uploaded image will be stored. It includes the unique image ID and a fixed path segment indicating that this is the original image.
+        
+        # Upload the image to S3. The image is base64-encoded, so decode it first. Bucket=S3_BUCKET means the S3 bucket to upload to.  The content type is set to "image/jpeg" for proper handling.
         s3_client.put_object(
             Bucket=S3_BUCKET,
             Key=s3_key,
@@ -509,20 +539,23 @@ def chat(request: ChatRequest):
             ContentType="image/jpeg",
         )
 
-    key_token = _current_s3_key.set(s3_key)
-    try:
+    key_token = _current_s3_key.set(s3_key) # key_token is the token used to reset the context variable for the current S3 key.
+    try:                                    # the context variable _current_s3_key is set to the new S3 key for this turn, so that any tools called during this turn will operate on the correct image. 
         start = time.time()
-        result = run_agent(lc_messages)
+        result = run_agent(lc_messages) # run_agent is called with the list of messages to send to the LLM. It returns an AgentResult object containing the final response text, any tools called, and other metadata about the interaction.
+                                        # the run_agent function implements a ReAct loop where it sends messages to the LLM, executes any tool calls requested by the LLM, and repeats until the LLM returns a plain text response or reaches the maximum number of iterations.
+                                        # the result object contains the final response text, the uid of the last YOLO prediction (if any), the S3 key of the processed image (if any), the number of iterations taken, the list of tools called, and token usage statistics.
         elapsed = round(time.time() - start, 2)
 
-        uid = result.prediction_uid
+        uid = result.prediction_uid # the uid of the last YOLO prediction, if any. This is used to fetch the annotated image from YOLO if no edit tools were called.
         # Only show the annotated (boxes) image when the user just detected things.
         # If any edit tool ran, the edited result is what they want to see instead.
         edit_tools = {"rotate", "flip", "blur", "resize", "crop", "add_noise"}
-        an_edit_ran = any(t in edit_tools for t in result.tools_called)
-        annotated = None if an_edit_ran else (fetch_annotated_image(uid) if uid else None)
+        an_edit_ran = any(t in edit_tools for t in result.tools_called) # a boolean indicating whether any of the image-editing tools were called during this turn. If any of these tools were called, the user likely wants to see the edited image rather than the annotated image with bounding boxes.
+        annotated = None if an_edit_ran else (fetch_annotated_image(uid) if uid else None) # the annotated image (with bounding boxes) is fetched from YOLO only if no edit tools were called and there is a valid prediction uid. If an edit tool was called, the user likely wants to see the edited image instead of the annotated image.
 
-        processed_image_b64 = (
+        # Fetch the final processed image from S3 and base64-encode it for the frontend. This is only done if an edit tool was called and produced a new S3 key.
+        processed_image_b64 = ( 
             _fetch_processed_image_b64(result.processed_s3_key)
             if result.processed_s3_key else None
         )
