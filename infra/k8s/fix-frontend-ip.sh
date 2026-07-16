@@ -23,7 +23,15 @@ IMAGE_REPO="shahdra/frontend-service"
 FRONTEND_NODEPORT="30300"
 AGENT_NODEPORT="30800"
 FRONTEND_CTX="services/frontend"             # docker build context (relative to repo root)
+DOCKER="sudo docker"                         # this host needs root for the docker daemon
 # ---------------------------------------------------------------------------
+
+# Always operate from the repo root, regardless of where the script is invoked
+# from (the script lives at <repo-root>/infra/k8s/).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
+echo "==> Working from repo root: ${REPO_ROOT}"
 
 echo "==> Discovering the worker's current public IP (${WORKER_INSTANCE_ID})"
 WORKER_IP="$(aws ec2 describe-instances \
@@ -48,14 +56,14 @@ echo "    image         = ${IMAGE}"
 echo
 
 echo "==> Building frontend image with NEXT_PUBLIC_AGENT_URL=${AGENT_URL}"
-docker build \
+${DOCKER} build \
   --build-arg NEXT_PUBLIC_AGENT_URL="${AGENT_URL}" \
   -t "${IMAGE}" \
   "${FRONTEND_CTX}"
 
 # Sanity check: confirm the new IP is actually baked into the built bundle.
 echo "==> Verifying the baked URL in the image bundle"
-if docker run --rm "${IMAGE}" sh -c "grep -rq '${WORKER_IP}:${AGENT_NODEPORT}' .next" ; then
+if ${DOCKER} run --rm "${IMAGE}" sh -c "grep -rq '${WORKER_IP}:${AGENT_NODEPORT}' .next" ; then
   echo "    OK: ${AGENT_URL} found in bundle"
 else
   echo "ERROR: ${AGENT_URL} not found in the built bundle — build-arg did not take." >&2
@@ -63,7 +71,7 @@ else
 fi
 
 echo "==> Pushing ${IMAGE}"
-docker push "${IMAGE}"
+${DOCKER} push "${IMAGE}"
 
 echo "==> Updating agent ALLOWED_ORIGINS -> ${FRONTEND_ORIGIN}"
 kubectl -n "${NS}" set env deploy/agent "ALLOWED_ORIGINS=${FRONTEND_ORIGIN}"
