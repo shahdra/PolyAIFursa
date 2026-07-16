@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
-# fix-frontend-ip.sh — re-point the k8s frontend/agent at the worker's CURRENT
-# public IP after a node restart.
+# fix-frontend-ip.sh — re-point a k8s frontend/agent at the worker's CURRENT
+# public IP after a node restart. Works for the dev or prod namespace.
+#
+#   ./infra/k8s/fix-frontend-ip.sh [dev|prod]     # default: dev
 #
 # Why this is needed: the worker has no Elastic IP, so its public IP changes on
 # every stop/start. The frontend calls the agent directly from the browser, and
@@ -10,18 +12,21 @@
 #   1. rebuild + push the frontend image with the new agent NodePort URL, and
 #   2. update the agent's ALLOWED_ORIGINS (CORS) to the new frontend origin.
 #
-# Run this ON THE CONTROL-PLANE, from the repo root, after a worker restart:
-#   ./infra/k8s/fix-frontend-ip.sh
-#
+# Run this ON THE CONTROL-PLANE after a worker restart.
 # Requires: kubectl, aws CLI, docker (logged in as the image-repo owner).
 set -euo pipefail
 
-# --- config (dev namespace / dev NodePorts) --------------------------------
-NS="dev"
+# --- args ------------------------------------------------------------------
+NS="${1:-dev}"
+case "${NS}" in
+  dev)  FRONTEND_NODEPORT="30300"; AGENT_NODEPORT="30800" ;;
+  prod) FRONTEND_NODEPORT="31300"; AGENT_NODEPORT="31800" ;;
+  *) echo "ERROR: namespace must be 'dev' or 'prod' (got '${NS}')" >&2; exit 1 ;;
+esac
+
+# --- config ----------------------------------------------------------------
 WORKER_INSTANCE_ID="i-0d10765e29b9bd911"     # shahd-worker
 IMAGE_REPO="shahdra/frontend-service"
-FRONTEND_NODEPORT="30300"
-AGENT_NODEPORT="30800"
 FRONTEND_CTX="services/frontend"             # docker build context (relative to repo root)
 DOCKER="sudo docker"                         # this host needs root for the docker daemon
 # ---------------------------------------------------------------------------
@@ -31,6 +36,7 @@ DOCKER="sudo docker"                         # this host needs root for the dock
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
+echo "==> Namespace: ${NS}  (frontend :${FRONTEND_NODEPORT}, agent :${AGENT_NODEPORT})"
 echo "==> Working from repo root: ${REPO_ROOT}"
 
 echo "==> Discovering the worker's current public IP (${WORKER_INSTANCE_ID})"
@@ -46,13 +52,13 @@ fi
 
 AGENT_URL="http://${WORKER_IP}:${AGENT_NODEPORT}"
 FRONTEND_ORIGIN="http://${WORKER_IP}:${FRONTEND_NODEPORT}"
-IMAGE_TAG="dev-${WORKER_IP//./-}"            # e.g. dev-44-211-138-37 (unique per IP)
+IMAGE_TAG="${NS}-${WORKER_IP//./-}"          # e.g. prod-44-201-87-27 (unique per ns+IP)
 IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
 
-echo "    worker IP     = ${WORKER_IP}"
-echo "    agent URL     = ${AGENT_URL}   (baked into frontend)"
+echo "    worker IP       = ${WORKER_IP}"
+echo "    agent URL       = ${AGENT_URL}   (baked into frontend)"
 echo "    frontend origin = ${FRONTEND_ORIGIN}   (agent CORS)"
-echo "    image         = ${IMAGE}"
+echo "    image           = ${IMAGE}"
 echo
 
 echo "==> Building frontend image with NEXT_PUBLIC_AGENT_URL=${AGENT_URL}"
