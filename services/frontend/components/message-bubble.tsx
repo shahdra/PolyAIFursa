@@ -17,7 +17,14 @@ export default function MessageBubble({ message }: { message: ChatMessage }) {
       >
         {message.image_base64 && (
           <img
-            src={`data:image/jpeg;base64,${message.image_base64}`}
+            // img-proc-mcp edit results (blur/rotate/flip/resize/crop/add_noise) are
+            // PNG; YOLO annotated images and user uploads are JPEG. Sniff the base64
+            // header rather than assuming one format for both.
+            src={`data:${
+              message.image_base64.startsWith("iVBORw0KGgo")
+                ? "image/png"
+                : "image/jpeg"
+            };base64,${message.image_base64}`}
             alt="uploaded"
             className="mb-2 max-h-48 rounded-lg object-contain"
           />

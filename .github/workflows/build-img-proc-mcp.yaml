@@ -1,0 +1,84 @@
+# Part III (containerization): builds and pushes the img-proc-mcp service
+# image on every change under services/img-proc-mcp/**. Runs independently of
+# the other three build-*.yaml workflows so touching one service never
+# rebuilds the others.
+name: Build & Push Img Proc MCP
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+    # Only fire when img-proc-mcp's own code changes - this is what makes
+    # each service independently buildable/deployable per the task requirement.
+    paths:
+      - "services/img-proc-mcp/**"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push img-proc-mcp image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/img-proc-mcp
+          push: true
+          # Tag with the commit SHA so every build gets a unique, traceable
+          # tag - never "latest", never reused across builds (see task notes).
+          tags: shahdra/img-proc-mcp-service:${{ github.sha }}
+
+  # Deploys only the img-proc-mcp service to the dev box - `docker compose up
+  # -d img-proc-mcp` recreates just that one container, leaving agent/yolo/
+  # frontend/monitoring untouched. Mirrors deploy.yaml's existing dev/prod
+  # SSH-branch split.
+  deploy-dev:
+    needs: build   # don't deploy an image that failed to build/push
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy img-proc-mcp to Dev instance
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEV_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
+          envs: IMG_PROC_IMAGE_TAG
+          script: |
+            cd ~/PolyAIFursa
+            git fetch origin
+            git checkout -B dev origin/dev
+            docker compose up -d img-proc-mcp
+            # Old container is already replaced above, so its image is now
+            # unreferenced - safe to reclaim disk before it fills up.
+            docker image prune -af
+        env:
+          IMG_PROC_IMAGE_TAG: ${{ github.sha }}
+
+  deploy-prod:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy img-proc-mcp to Prod instance
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_INSTANCE_IP }}
+          username: ubuntu
+          key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
+          envs: IMG_PROC_IMAGE_TAG
+          script: |
+            cd ~/PolyAIFursa
+            git fetch origin
+            git checkout -B main origin/main
+            docker compose up -d img-proc-mcp
+            docker image prune -af
+        env:
+          IMG_PROC_IMAGE_TAG: ${{ github.sha }}

@@ -1,11 +1,12 @@
 # Vision Agent
 
-A LangChain-powered AI vision agent with a manual ReAct loop. Accepts text and base64-encoded images, and can call tools (e.g. YOLO object detection) to answer questions.
+A LangChain-powered AI vision agent with a manual ReAct loop. Accepts text and base64-encoded images, and can call tools (YOLO object detection plus image editing) to answer questions and edit images.
 
 ## Prerequisites
 
 - Python 3.10+
 - A running YOLO service (optional - only needed for `detect_objects`)
+- A running img-proc MCP service (optional - only needed for the image-editing tools; see `services/img-proc-mcp`)
 
 
 ## Setup
@@ -32,6 +33,25 @@ cp .env.example .env
 | `GOOGLE_API_KEY` | - | Required for Google models |
 | `MODEL` | `claude-sonnet-4-6` | Any model string supported by `init_chat_model` |
 | `YOLO_SERVICE_URL` | `http://localhost:8080` | URL of the YOLO microservice |
+| `IMG_PROC_MCP_URL` | `http://localhost:9000/mcp` | URL of the img-proc MCP server |
+
+## Tools
+
+The agent combines two kinds of tools at startup:
+
+- **Local tools** defined in `app.py` — currently `detect_objects`, which uploads the
+  image to S3 and runs YOLO object detection, returning each object's label, score, and
+  bounding box.
+- **Image-editing tools discovered over MCP** — `rotate`, `flip`, `blur`, `resize`,
+  `crop`, and `add_noise` are **not** defined in `app.py`. They are discovered from the
+  [img-proc MCP server](../img-proc-mcp) over HTTP (`IMG_PROC_MCP_URL`) when the agent
+  starts, and merged into the tool registry. If the MCP server is unreachable at startup,
+  the agent logs a warning and runs with only the local tools.
+
+The LLM never handles image bytes: the `image_b64` argument is hidden from the tool
+schema the model sees, injected from the current working image at call time, and the
+resulting image is stripped from the tool result before it re-enters the model's context.
+The edited image is returned to the caller in the `processed_image` response field.
 
 ## Running
 
@@ -89,7 +109,15 @@ Response:
 
 ```json
 {
-  "response": "string"
+  "response": "string",
+  "prediction_id": "string | null",
+  "annotated_image": "string | null (base64 of the YOLO bounding-box image)",
+  "processed_image": "string | null (base64 result of an image-editing tool)",
+  "agent_loop_time_s": "number | null",
+  "iterations": "number | null",
+  "tools_called": ["string"],
+  "tokens_used": {"input": 0, "output": 0, "total": 0},
+  "context_limit_exceeded": false
 }
 ```
 
