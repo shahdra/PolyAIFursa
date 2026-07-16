@@ -1,0 +1,95 @@
+# YOLO object-detection service (prod namespace).
+# Internal only (ClusterIP) — reached by the agent at yolo-service:8080 and
+# scraped by Prometheus at yolo-service:8080/metrics.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yolo
+  namespace: prod
+  labels:
+    app: yolo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: yolo
+  template:
+    metadata:
+      labels:
+        app: yolo
+    spec:
+      # YOLO handles SIGTERM to drain in-flight requests (/ready flips to 503);
+      # give it room to finish before the kubelet SIGKILLs it.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: yolo
+          image: shahdra/yolo-service:76ff39f482da4e25d0c74a806f4a7a419e9dc0d4
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: polyai-secrets   # AWS_* , AWS_S3_BUCKET, etc.
+          # Loads yolov8n.pt (torch) at import -> slow start. startupProbe
+          # guards the boot window; liveness/readiness take over once up.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 30      # up to ~150s to become live
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            # /ready returns 503 once SIGTERM is received, draining this pod
+            # out of the Service endpoints during shutdown.
+            httpGet:
+              path: /ready
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: yolo-service
+  namespace: prod
+  labels:
+    app: yolo
+spec:
+  type: ClusterIP
+  selector:
+    app: yolo
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: yolo
+  namespace: prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: yolo
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50

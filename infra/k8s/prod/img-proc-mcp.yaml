@@ -1,0 +1,65 @@
+# Image-processing MCP server (prod namespace).
+# Internal only (ClusterIP) — reached by the agent at
+# img-proc-mcp-service:9000/mcp. Health probes hit the /health route added to
+# the FastMCP app (the /mcp endpoint speaks the MCP protocol, not plain HTTP).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: img-proc-mcp
+  namespace: prod
+  labels:
+    app: img-proc-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: img-proc-mcp
+  template:
+    metadata:
+      labels:
+        app: img-proc-mcp
+    spec:
+      containers:
+        - name: img-proc-mcp
+          image: shahdra/img-proc-mcp-service:8877505feaeef2a1ff83bd02b559f3b8683e2f00
+          ports:
+            - containerPort: 9000
+          envFrom:
+            - secretRef:
+                name: polyai-secrets   # AWS_* , AWS_S3_BUCKET
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: img-proc-mcp-service
+  namespace: prod
+  labels:
+    app: img-proc-mcp
+spec:
+  type: ClusterIP
+  selector:
+    app: img-proc-mcp
+  ports:
+    - port: 9000
+      targetPort: 9000
