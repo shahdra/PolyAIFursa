@@ -21,8 +21,8 @@ data:
         static_configs:
           - targets: ['agent-service:8000']
 ---
-# Static PV pointing at the pre-created EBS volume for dev (us-east-1d).
-# Replace the volumeHandle with the dev prometheus EBS VolumeId.
+# Static PV pointing at the pre-created EBS volume for prod (us-east-1d).
+# Replace the volumeHandle with the prod prometheus EBS VolumeId.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -40,7 +40,7 @@ spec:
     name: prometheus-pvc
   csi:
     driver: ebs.csi.aws.com
-    volumeHandle: REPLACE_ME_PROM_PROD_VOLUME_ID
+    volumeHandle: vol-0e61a22095b9ca644
     fsType: ext4
 ---
 apiVersion: v1

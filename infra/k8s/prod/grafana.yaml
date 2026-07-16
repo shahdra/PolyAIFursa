@@ -57,7 +57,7 @@ spec:
     name: grafana-pvc
   csi:
     driver: ebs.csi.aws.com
-    volumeHandle: REPLACE_ME_GRAFANA_PROD_VOLUME_ID
+    volumeHandle: vol-04e134572802ad306
     fsType: ext4
 ---
 apiVersion: v1

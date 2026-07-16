@@ -33,8 +33,10 @@ spec:
               value: http://img-proc-mcp-service:9000/mcp
             # CORS: must match the browser origin the frontend is served from
             # (frontend NodePort on the node's public IP). Set the real value here.
+            # Set at runtime by infra/k8s/fix-frontend-ip.sh (worker IP is
+            # ephemeral). Placeholder here so a stale IP never ships in git.
             - name: ALLOWED_ORIGINS
-              value: http://44.211.138.37:31300
+              value: http://SET_BY_FIX_SCRIPT:31300
           envFrom:
             - secretRef:
                 name: polyai-secrets   # MODEL, AWS_*, AWS_S3_BUCKET, *_API_KEY
