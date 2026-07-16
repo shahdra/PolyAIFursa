@@ -7,8 +7,18 @@ import random
 import boto3
 from fastmcp import FastMCP
 from PIL import Image, ImageFilter, ImageOps
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 mcp = FastMCP("img-proc")
+
+
+# Plain HTTP health check for Kubernetes liveness/readiness probes. The only
+# other HTTP surface is the MCP endpoint at /mcp, which speaks the MCP protocol
+# rather than answering a simple GET, so probes target this route instead.
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
 S3_BUCKET = os.environ.get("AWS_S3_BUCKET", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
