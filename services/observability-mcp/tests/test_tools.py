@@ -117,3 +117,20 @@ def test_missing_bucket_returns_error(app):
     app._ENVS["prod"] = ("http://localhost:9091", "")
     r = json.loads(app.get_container_logs(env="prod", since_minutes=5))
     assert r["success"] is False and "bucket" in r["error"]
+
+
+def test_unwrap_doubly_encoded_record(app):
+    # the real production shape: Fluent Bit re-wraps the Docker json line, so
+    # the inner log/stream/attrs live inside the outer "log" string.
+    inner = json.dumps(
+        {"log": "GET /metrics 200", "stream": "stdout",
+         "attrs": {"container_name": "yolo-service"},
+         "time": "2026-07-17T15:26:20.007401452Z"}
+    )
+    outer = {"date": "2026-07-17T15:26:20.007540Z", "host": "d41124c83fdf", "log": inner}
+    flat = app._unwrap(outer)
+    assert app._record_container(flat) == "yolo-service"
+    assert flat["stream"] == "stdout"
+    assert flat["log"] == "GET /metrics 200"
+    # already-flat record is unchanged
+    assert app._unwrap({"log": "plain text"})["log"] == "plain text"
