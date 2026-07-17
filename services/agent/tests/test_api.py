@@ -62,3 +62,45 @@ class TestChat(unittest.TestCase):
         # Missing the required "messages" field -> FastAPI validation error.
         response = self.client.post("/chat", json={})
         self.assertEqual(response.status_code, 422)
+
+
+class TestChatMetrics(unittest.TestCase):
+    """Task 5 - agent observability: /chat must emit custom token + latency
+    metrics on /metrics in addition to the default instrumentator metrics."""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("app.run_agent")
+    def test_token_and_latency_metrics_emitted(self, mock_run_agent):
+        mock_run_agent.return_value = AgentResult(
+            text="ok",
+            iterations=1,
+            tools_called=[],
+            prediction_uid=None,
+            tokens_used={"input": 100, "output": 20, "total": 120},
+        )
+        r = self.client.post(
+            "/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        self.assertEqual(r.status_code, 200)
+
+        metrics = self.client.get("/metrics").text
+        # custom metrics are present and reflect this request
+        self.assertIn("agent_chat_llm_input_tokens_total", metrics)
+        self.assertIn("agent_chat_llm_output_tokens_total", metrics)
+        self.assertIn("agent_chat_duration_seconds", metrics)
+        # success-labelled latency histogram recorded at least one observation
+        self.assertIn('agent_chat_duration_seconds_count{status="success"}', metrics)
+
+    @patch("app.run_agent")
+    def test_error_labels_latency_and_propagates(self, mock_run_agent):
+        mock_run_agent.side_effect = RuntimeError("boom")
+        # a real client sees HTTP 500; don't let TestClient re-raise the error
+        client = TestClient(app, raise_server_exceptions=False)
+        r = client.post(
+            "/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+        self.assertEqual(r.status_code, 500)
+        metrics = client.get("/metrics").text
+        self.assertIn('agent_chat_duration_seconds_count{status="error"}', metrics)

@@ -30,6 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # response time in the format Prometheus expects - the same way Yolo
 # already exposes its own /metrics.
 from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_client import Counter, Histogram
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
@@ -472,6 +473,28 @@ app = FastAPI(title="Vision Agent")
 # Prometheus can scrape this service at agent:8000/metrics, same as Yolo.
 Instrumentator().instrument(app).expose(app)
 
+# Task 5 - Agent observability. Custom /chat metrics on top of the default
+# instrumentator metrics. Requests-per-minute-by-status and error-rate come
+# from the default http_requests_total{handler="/chat",status=...}; these add
+# what the defaults don't cover: a /chat-specific latency histogram and the
+# LLM token counts (which run_agent already accumulates from usage_metadata).
+CHAT_DURATION = Histogram(
+    "agent_chat_duration_seconds",
+    "End-to-end /chat request duration, labelled by outcome.",
+    labelnames=("status",),  # "success" | "error"
+    buckets=(0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+)
+CHAT_INPUT_TOKENS = Counter(
+    "agent_chat_llm_input_tokens_total",
+    "Total LLM input (prompt) tokens consumed by /chat.",
+    labelnames=("model",),
+)
+CHAT_OUTPUT_TOKENS = Counter(
+    "agent_chat_llm_output_tokens_total",
+    "Total LLM output (completion) tokens produced by /chat.",
+    labelnames=("model",),
+)
+
 ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS", "http://localhost:3000"
 ).split(",")
@@ -540,8 +563,9 @@ def chat(request: ChatRequest):
         )
 
     key_token = _current_s3_key.set(s3_key) # key_token is the token used to reset the context variable for the current S3 key.
-    try:                                    # the context variable _current_s3_key is set to the new S3 key for this turn, so that any tools called during this turn will operate on the correct image. 
-        start = time.time()
+    chat_status = "success"                 # flipped to "error" if the turn raises; labels the latency histogram
+    start = time.time()
+    try:                                    # the context variable _current_s3_key is set to the new S3 key for this turn, so that any tools called during this turn will operate on the correct image.
         result = run_agent(lc_messages) # run_agent is called with the list of messages to send to the LLM. It returns an AgentResult object containing the final response text, any tools called, and other metadata about the interaction.
                                         # the run_agent function implements a ReAct loop where it sends messages to the LLM, executes any tool calls requested by the LLM, and repeats until the LLM returns a plain text response or reaches the maximum number of iterations.
                                         # the result object contains the final response text, the uid of the last YOLO prediction (if any), the S3 key of the processed image (if any), the number of iterations taken, the list of tools called, and token usage statistics.
@@ -560,6 +584,11 @@ def chat(request: ChatRequest):
             if result.processed_s3_key else None
         )
 
+        # Record LLM token usage for this turn (run_agent already summed it
+        # from each call's usage_metadata). Labelled by model for per-model rates.
+        CHAT_INPUT_TOKENS.labels(model=MODEL or "unknown").inc(result.tokens_used.get("input", 0))
+        CHAT_OUTPUT_TOKENS.labels(model=MODEL or "unknown").inc(result.tokens_used.get("output", 0))
+
         return ChatResponse(
             response=result.text,
             prediction_id=uid,
@@ -571,7 +600,11 @@ def chat(request: ChatRequest):
             tokens_used=result.tokens_used,
             context_limit_exceeded=result.context_limit_exceeded,
         )
+    except Exception:
+        chat_status = "error"
+        raise
     finally:
+        CHAT_DURATION.labels(status=chat_status).observe(time.time() - start)
         _current_s3_key.reset(key_token)
 
 @app.get("/health")
