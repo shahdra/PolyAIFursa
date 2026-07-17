@@ -1,6 +1,8 @@
-# Part III (containerization): builds and pushes the frontend service image
-# on every change under services/frontend/**. Runs independently of the other
-# three build-*.yaml workflows so touching one service never rebuilds the others.
+# Task 4 - Part III: Service containerization
+#
+# Same pattern as build-agent.yaml, for the frontend: builds a Docker image
+# on every push touching services/frontend/**, pushes it to Docker Hub, then
+# redeploys just the frontend container on dev/prod via SSH.
 #
 # Frontend is special among the four services: NEXT_PUBLIC_AGENT_URL gets
 # baked into the client-side JS bundle at build time (Next.js only reads
@@ -45,8 +47,6 @@ jobs:
           # the frontend uses this to know wher to send requests, for the agent in the dev instance 
           build-args: |
             NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:8000 
-          # -dev suffix (not just the bare sha) so this can never collide with
-          # a -prod build of the same commit that bakes in a different URL.
           tags: shahdra/frontend-service:${{ github.sha }}-dev
 
   build-prod:

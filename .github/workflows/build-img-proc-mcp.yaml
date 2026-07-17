@@ -1,7 +1,10 @@
-# Part III (containerization): builds and pushes the img-proc-mcp service
-# image on every change under services/img-proc-mcp/**. Runs independently of
-# the other three build-*.yaml workflows so touching one service never
-# rebuilds the others.
+# Task 4 - Part III: Service containerization
+#
+# Same pattern as build-agent.yaml, for the Part I image-processing MCP
+# server: on every push that touches services/img-proc-mcp/**, this builds
+# a Docker image tagged with the commit SHA, pushes it to Docker Hub, then
+# SSHes into the dev/prod server and runs `docker compose up -d img-proc-mcp`
+# to redeploy just that one container.
 name: Build & Push Img Proc MCP
 
 on:

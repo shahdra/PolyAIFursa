@@ -1,6 +1,17 @@
-# Part III (containerization): builds and pushes the agent service image on
-# every change under services/agent/**. Runs independently of the other three
-# build-*.yaml workflows so touching one service never rebuilds the others.
+# Task 4 - Part III: Service containerization
+#
+# This workflow runs automatically every time code under services/agent/**
+# is pushed. It does two things:
+#   1. build:  packages the agent into a Docker image and uploads it to
+#              Docker Hub, tagged with the commit's unique SHA (never
+#              "latest" - so every image can be traced back to the exact
+#              code it was built from).
+#   2. deploy: connects to the dev or prod server over SSH and runs
+#              `docker compose up -d agent`, which pulls that new image and
+#              restarts only the agent container - yolo, frontend, and the
+#              rest of the stack keep running untouched.
+# Yolo, frontend, and img-proc-mcp each have their own matching workflow
+# file, so changing one service only rebuilds/redeploys that one service.
 name: Build & Push Agent
 
 on:
@@ -15,7 +26,7 @@ on:
   # Lets this be re-run on demand (Actions tab -> "Run workflow", or
   # `gh workflow run`) for changes that don't touch services/agent/** but
   # still need a redeploy - e.g. compose-level env vars like ALLOWED_ORIGINS.
-  workflow_dispatch:
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -32,7 +43,7 @@ jobs:
       - name: Build and push agent image
         uses: docker/build-push-action@v6
         with:
-          context: services/agent
+          context: services/agent # where the Dockerfile is located to know what to build the image from
           push: true
           # Tag with the commit SHA so every build gets a unique, traceable
           # tag - never "latest", never reused across builds (see task notes).
@@ -63,7 +74,7 @@ jobs:
             docker image prune -af
         env:
           AGENT_IMAGE_TAG: ${{ github.sha }}
-          ALLOWED_ORIGINS: http://${{ secrets.DEV_INSTANCE_IP }}:3000
+          ALLOWED_ORIGINS: http://${{ secrets.DEV_INSTANCE_IP }}:3000 # This is the URL that the frontend will use to call the agent API. It must match the ALLOWED_ORIGINS value in the agent container's environment so that CORS allows it.
 
   deploy-prod:
     needs: build
@@ -76,7 +87,7 @@ jobs:
           host: ${{ secrets.PROD_INSTANCE_IP }}
           username: ubuntu
           key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
-          envs: AGENT_IMAGE_TAG,ALLOWED_ORIGINS
+          envs: AGENT_IMAGE_TAG,ALLOWED_ORIGINS # exports these into the SSH session's shell for Compose to read
           script: |
             cd ~/PolyAIFursa
             git fetch origin

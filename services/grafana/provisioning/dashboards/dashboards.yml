@@ -1,4 +1,9 @@
-
+# Task 4 - Part II: Observability
+#
+# Grafana reads this file on startup and loads every dashboard JSON file
+# found in services/grafana/dashboards/ (the "Node Exporter Full" dashboard,
+# ID 1860, giving host-level CPU/memory/disk/network graphs). No manual
+# "import dashboard" step needed.
 apiVersion: 1
 
 providers:

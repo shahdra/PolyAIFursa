@@ -44,7 +44,9 @@ import torch
 torch.cuda.is_available = lambda: False
 
 app = FastAPI() #This one line creates my web application. Before this line,we have a Python script. After this line, you have a web server that can receive HTTP requests and send responses.
-# Expose /metrics endpoint with default process metrics + FastAPI HTTP metrics
+# Task 4 - Part II: Observability. Adds a GET /metrics endpoint listing
+# request counts, response times, etc. in the format Prometheus reads, so
+# this service can be scraped at yolo:8080/metrics (see services/prometheus.yml).
 Instrumentator().instrument(app).expose(app)
 
 

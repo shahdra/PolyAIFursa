@@ -1,8 +1,11 @@
-# Part III (containerization): redeploys the monitoring stack whenever its
-# config changes. Unlike the other build-*.yaml workflows, prometheus/grafana/
-# node-exporter run off official upstream images (no Dockerfile to build) -
-# this workflow only needs to ship the new config to the instance and restart
-# those three containers so the bind-mounted files are picked up.
+# Task 4 - Part II & III: Observability + containerization
+#
+# Prometheus, Grafana, and Node Exporter run off ready-made public Docker
+# images (there's no source code to build for them, unlike the other four
+# services) - all that ever changes is their config files (services/
+# prometheus.yml, services/grafana/**). So instead of a build step, this
+# workflow just pulls the latest code onto the dev/prod server and restarts
+# those three containers so they pick up the new config.
 name: Deploy Monitoring Stack
 
 on:

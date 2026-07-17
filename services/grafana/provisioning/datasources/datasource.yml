@@ -1,3 +1,10 @@
+# Task 4 - Part II: Observability
+#
+# Grafana reads this file on startup and automatically connects itself to
+# Prometheus - so nobody has to open the Grafana UI and manually type in
+# "http://prometheus:9090" to add a data source by hand.
+# Grafana reads every file under provisioning/datasources/ on startup and wires up any data source listed. 
+# Prometheus is already connected the moment Grafana boots — nobody has to open Settings → Data Sources → Add and type http://prometheus:9090 by hand.
 apiVersion: 1
 
 datasources:

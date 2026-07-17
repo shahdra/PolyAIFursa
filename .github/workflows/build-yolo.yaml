@@ -1,6 +1,9 @@
-# Part III (containerization): builds and pushes the yolo service image on
-# every change under services/yolo/**. Runs independently of the other three
-# build-*.yaml workflows so touching one service never rebuilds the others.
+# Task 4 - Part III: Service containerization
+#
+# Same pattern as build-agent.yaml, for the yolo service: on every push that
+# touches services/yolo/**, this builds a Docker image tagged with the
+# commit SHA, pushes it to Docker Hub, then SSHes into the dev/prod server
+# and runs `docker compose up -d yolo` to redeploy just that one container.
 name: Build & Push Yolo
 
 on:

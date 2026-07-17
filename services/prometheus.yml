@@ -1,19 +1,24 @@
+# Task 4 - Part II: Observability
+#
+# This file tells Prometheus WHERE to collect metrics from and HOW OFTEN.
+# Each entry under scrape_configs is one "target": a service with a
+# /metrics HTTP endpoint that Prometheus will visit and read numbers from.
+# Every 15 seconds, Prometheus visits http://<target>/metrics for each of these three and stores the numbers as a time series.
 global:
-  scrape_interval: 15s
+  scrape_interval: 15s   # visit every target and pull fresh numbers every 15 seconds
 
 scrape_configs:
+  # Yolo's FastAPI app exposes request counts, latency, etc. at /metrics.
   - job_name: 'yolo-service'
     static_configs:
       - targets: ['yolo:8080']
 
-  # Agent's FastAPI app now exposes /metrics via prometheus-fastapi-instrumentator
-  # (see services/agent/app.py), reachable on polyai-net at agent:8000.
+ 
   - job_name: 'agent-service'
     static_configs:
       - targets: ['agent:8000']
 
-  # Host-level metrics (CPU/mem/disk/net) served by the node-exporter
-  # container on monitoring-net (see services/docker-compose.yaml).
+
   - job_name: 'node-exporter'
     static_configs:
       - targets: ['node-exporter:9100']
