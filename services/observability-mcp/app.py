@@ -113,10 +113,39 @@ def _iter_log_records(bucket: str, start: datetime, end: datetime):
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                yield _unwrap(json.loads(line))
             except json.JSONDecodeError:
                 # tolerate a stray non-JSON line rather than aborting
                 yield {"log": line}
+
+
+def _unwrap(rec: dict) -> dict:
+    """Flatten a doubly-encoded record.
+
+    Fluent Bit's docker parser re-wraps the already-JSON Docker log line, so a
+    record can look like:
+      {"date":..., "host":..., "log": "{\\"log\\":..., \\"stream\\":...,
+                                        \\"attrs\\":{\\"container_name\\":...}}"}
+    Merge the inner object's fields up (real log/stream/attrs/time) while keeping
+    the outer 'date' and 'host'. No-op for already-flat records.
+    """
+    inner_str = rec.get("log")
+    if isinstance(inner_str, str):
+        s = inner_str.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                inner = json.loads(s)
+            except json.JSONDecodeError:
+                return rec
+            if isinstance(inner, dict):
+                merged = {**inner}
+                # preserve outer envelope fields the inner object lacks
+                if "host" in rec and "host" not in merged:
+                    merged["host"] = rec["host"]
+                if "date" in rec:
+                    merged.setdefault("_outer_date", rec["date"])
+                return merged
+    return rec
 
 
 def _record_ts(rec: dict) -> float | None:
@@ -125,7 +154,7 @@ def _record_ts(rec: dict) -> float | None:
     Handles Fluent Bit's numeric 'date', and ISO 'time'/'timestamp' strings —
     including Docker's nanosecond precision, which datetime.fromisoformat can't
     parse (it accepts at most 6 fractional digits)."""
-    for k in ("date", "time", "timestamp"):
+    for k in ("time", "date", "timestamp", "_outer_date"):
         v = rec.get(k)
         if isinstance(v, (int, float)):
             return float(v)
