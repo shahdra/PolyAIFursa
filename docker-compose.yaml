@@ -133,6 +133,25 @@ services:
     networks:
       - monitoring-net
 
+  # Fluent Bit: tails every container's Docker JSON log, tags it with the host,
+  # and ships gzipped batches to S3. Runs on each EC2 box; LOGS_BUCKET selects
+  # the per-env bucket (dev -> shahd-polyai-logs-dev, prod -> ...-prod).
+  fluent-bit:
+    image: fluent/fluent-bit:4.2.7
+    container_name: fluent-bit
+    restart: unless-stopped
+    # LOGS_BUCKET + AWS_* creds come from the same .env used by the app services
+    # (gitignored, per-box). Set LOGS_BUCKET=shahd-polyai-logs-dev on the dev
+    # box and ...-prod on the prod box.
+    env_file:
+      - ./services/agent/.env
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/log:/var/log
+    networks:
+      - monitoring-net
+
 volumes:
   prometheus-data:
   grafana-data:
