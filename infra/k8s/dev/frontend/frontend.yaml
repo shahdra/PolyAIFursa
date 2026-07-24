@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: shahdra/frontend-service:1e980d1bbf85c9230598a37b0b9df76ca9ea8753-dev
+          image: shahdra/frontend-service:59e55eba438c016a5cd70805ea331abfa4b75894-dev
           ports:
             - containerPort: 3000
           # Next.js has no dedicated health route; probe the home page.
