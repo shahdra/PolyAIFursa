@@ -23,7 +23,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: yolo
-          image: shahdra/yolo-service:76ff39f482da4e25d0c74a806f4a7a419e9dc0d4
+          image: shahdra/yolo-service:59e55eba438c016a5cd70805ea331abfa4b75894
           ports:
             - containerPort: 8080
           envFrom:
