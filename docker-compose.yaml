@@ -4,6 +4,12 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/frontend-service:${FRONTEND_IMAGE_TAG:-local}
     container_name: frontend
+    labels:
+      container_name: frontend-service   # embedded into log records' attrs
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     # Bring the stack back up automatically after an EC2 stop/start or reboot
     # (Docker's own restart policy default is "no" - containers stay Exited
     # otherwise). "unless-stopped" restarts on daemon startup/crash but won't
@@ -21,6 +27,12 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/agent-service:${AGENT_IMAGE_TAG:-local}
     container_name: agent
+    labels:
+      container_name: agent-service
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -53,6 +65,12 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/yolo-service:${YOLO_IMAGE_TAG:-local}
     container_name: yolo
+    labels:
+      container_name: yolo-service
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     restart: unless-stopped
     # AWS_* comes from this file - gitignored, real values live on each
     # instance; see services/yolo/.env.example for the required keys.
@@ -67,6 +85,12 @@ services:
     # :local default keeps a bare `docker compose up` working for local dev with no env vars set.
     image: shahdra/img-proc-mcp-service:${IMG_PROC_IMAGE_TAG:-local}
     container_name: img-proc-mcp
+    labels:
+      container_name: img-proc-mcp-service
+    logging:
+      driver: json-file
+      options:
+        labels: container_name
     restart: unless-stopped
     # Edit tools read/write the working image via S3 keys instead of shipping
     # base64 bytes in every MCP request/response - same bucket the agent
@@ -130,6 +154,25 @@ services:
       - grafana-data:/var/lib/grafana
       - ./services/grafana/provisioning:/etc/grafana/provisioning   # auto-wires datasource + dashboard provider
       - ./services/grafana/dashboards:/var/lib/grafana/dashboards   # dashboard JSON (FastAPI Observability, 22676)
+    networks:
+      - monitoring-net
+
+  # Fluent Bit: tails every container's Docker JSON log (which now carries the
+  # container_name label in attrs), tags with host, ships gzipped batches to S3.
+  # Runs on each EC2 box; LOGS_BUCKET selects the per-env bucket.
+  fluent-bit:
+    image: fluent/fluent-bit:4.2.7
+    container_name: fluent-bit
+    restart: unless-stopped
+    # LOGS_BUCKET + AWS_* creds come from the same .env used by the app services
+    # (gitignored, per-box). Set LOGS_BUCKET=shahd-polyai-logs-dev on the dev
+    # box and ...-prod on the prod box.
+    env_file:
+      - ./services/agent/.env
+    volumes:
+      - ./fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/log:/var/log
     networks:
       - monitoring-net
 

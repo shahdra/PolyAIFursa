@@ -1,0 +1,85 @@
+# Frontend (Next.js) service (dev namespace).
+# NodePort — served to the browser. NOTE: NEXT_PUBLIC_AGENT_URL is compiled
+# into the JS bundle at build time (see services/frontend/Dockerfile), so the
+# image must be built with --build-arg NEXT_PUBLIC_AGENT_URL pointing at the
+# agent's NodePort URL. Setting it as a runtime env var here has NO effect.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: dev
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: shahdra/frontend-service:1e980d1bbf85c9230598a37b0b9df76ca9ea8753-dev
+          ports:
+            - containerPort: 3000
+          # Next.js has no dedicated health route; probe the home page.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: dev
+  labels:
+    app: frontend
+spec:
+  type: NodePort
+  selector:
+    app: frontend
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: 30300     # dev frontend — open http://<node-ip>:30300 in the browser
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: dev
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: frontend
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50

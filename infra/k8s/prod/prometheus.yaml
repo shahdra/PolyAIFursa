@@ -1,0 +1,132 @@
+# Prometheus (prod namespace): ConfigMap (scrape config) + static EBS storage
+# (PV/PVC) + Deployment + Service. node-exporter is intentionally dropped
+# (excluded from the k8s migration per task5.md). Scrape targets use in-cluster
+# Service DNS names instead of the compose hostnames.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: prod
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+
+    scrape_configs:
+      - job_name: 'yolo-service'
+        static_configs:
+          - targets: ['yolo-service:8080']
+
+      - job_name: 'agent-service'
+        static_configs:
+          - targets: ['agent-service:8000']
+---
+# Static PV pointing at the pre-created EBS volume for prod (us-east-1d).
+# Replace the volumeHandle with the prod prometheus EBS VolumeId.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: prometheus-pv-prod
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ebs-sc
+  persistentVolumeReclaimPolicy: Retain
+  # claimRef pins this PV to the dev PVC so it can't be grabbed by prod.
+  claimRef:
+    namespace: prod
+    name: prometheus-pvc
+  csi:
+    driver: ebs.csi.aws.com
+    volumeHandle: vol-0e61a22095b9ca644
+    fsType: ext4
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: prod
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ebs-sc
+  resources:
+    requests:
+      storage: 5Gi
+  volumeName: prometheus-pv-prod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: prod
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      securityContext:
+        fsGroup: 65534   # prometheus runs as nobody(65534); make the volume writable
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.53.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: prometheus-storage
+              mountPath: /prometheus
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 160Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: prometheus-storage
+          persistentVolumeClaim:
+            claimName: prometheus-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service
+  namespace: prod
+  labels:
+    app: prometheus
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090

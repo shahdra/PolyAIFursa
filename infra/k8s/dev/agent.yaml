@@ -1,0 +1,104 @@
+# Agent service (dev namespace).
+# NodePort — the browser calls the agent directly (NEXT_PUBLIC_AGENT_URL is
+# baked into the frontend bundle at build time), so the agent must be reachable
+# from outside the cluster. Also scraped by Prometheus at agent-service:8000/metrics.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+  namespace: dev
+  labels:
+    app: agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent
+  template:
+    metadata:
+      labels:
+        app: agent
+    spec:
+      containers:
+        - name: agent
+          image: shahdra/agent-service:76ff39f482da4e25d0c74a806f4a7a419e9dc0d4
+          ports:
+            - containerPort: 8000
+          env:
+            # Cluster topology: override the localhost defaults baked in the code
+            # with the in-cluster Service DNS names.
+            - name: YOLO_SERVICE_URL
+              value: http://yolo-service:8080
+            - name: IMG_PROC_MCP_URL
+              value: http://img-proc-mcp-service:9000/mcp
+            # CORS: must match the browser origin the frontend is served from
+            # (frontend NodePort on the node's public IP). Set the real value here.
+            - name: ALLOWED_ORIGINS
+              value: http://44.211.138.37:30300
+          envFrom:
+            - secretRef:
+                name: polyai-secrets   # MODEL, AWS_*, AWS_S3_BUCKET, *_API_KEY
+          # Startup runs MCP tool discovery + init_chat_model at import before
+          # uvicorn binds :8000 — can be slow and depends on img-proc-mcp being
+          # reachable. startupProbe covers that window.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            failureThreshold: 24      # up to ~120s to boot
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-service
+  namespace: dev
+  labels:
+    app: agent
+spec:
+  type: NodePort
+  selector:
+    app: agent
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: 30800     # dev agent — browser reaches http://<node-ip>:30800
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: agent
+  namespace: dev
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: agent
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50

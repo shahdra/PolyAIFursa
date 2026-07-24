@@ -1,6 +1,7 @@
 fastapi
 uvicorn[standard]
 prometheus-fastapi-instrumentator   # exposes GET /metrics for Prometheus, same as the yolo service
+prometheus-client                    # custom /chat metrics (token counters, latency histogram)
 python-dotenv
 langchain
 langgraph
