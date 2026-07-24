@@ -5,9 +5,15 @@ This directory holds the ArgoCD `Application` manifests that make this repo the
 tag into `infra/k8s/<env>/<svc>/`; ArgoCD watches the repo and syncs the cluster
 to match. No more SSH-into-the-box `docker compose` deploys.
 
-- **dev apps** (`*-dev.yaml`) → namespace `dev`, **auto-sync** (`prune` + `selfHeal`).
-- **prod apps** (`*-prod.yaml`) → namespace `prod`, **manual sync** (review before promoting).
-- **`app-of-apps.yaml`** → one app that creates all the others (`path: infra/k8s/argo`).
+- **dev apps** (`dev/*.yaml`) → track the **`dev` branch**, deploy to namespace `dev`,
+  **auto-sync** (`prune` + `selfHeal`).
+- **prod apps** (`prod/*.yaml`) → track the **`main` branch**, deploy to namespace `prod`,
+  **manual sync** (review before promoting).
+- **`app-of-apps-dev.yaml`** → creates the 6 dev apps (`path: infra/k8s/argo/dev`, branch `dev`).
+- **`app-of-apps-prod.yaml`** → creates the 6 prod apps (`path: infra/k8s/argo/prod`, branch `main`).
+
+Promotion model: merge `dev` → `main`. Dev deploys from the `dev` branch; promoting to
+prod means merging into `main`, then manually syncing the prod apps.
 
 ## Cluster reference (this deployment)
 
@@ -147,15 +153,20 @@ the manifest's older tag. When git matches live, adoption is a no-op rollout.
 
 ---
 
-## Step 5 — Bootstrap all apps (app-of-apps)
+## Step 5 — Bootstrap DEV (app-of-apps-dev)
 
-Apply the single parent app; it creates the 12 child Applications for you:
+There is one parent app per environment. Bootstrap **dev first** — it reads from the
+`dev` branch and creates the 6 dev child apps.
+
+> The parent manifests must exist on the branch you apply them from. `app-of-apps-dev`
+> is applied from a checkout of the **`dev` branch**; `app-of-apps-prod` from **`main`**.
 
 ```bash
-kubectl apply -f infra/k8s/argo/app-of-apps.yaml
+# on the control-plane, in a checkout of the dev branch:
+kubectl apply -f infra/k8s/argo/app-of-apps-dev.yaml
 ```
 
-Watch them appear and settle:
+Watch the dev apps appear and settle:
 
 ```bash
 kubectl -n argocd get applications
@@ -165,17 +176,25 @@ argocd app list
 
 Expected result:
 
-- **dev** apps (`*-dev`) → `Synced` / `Healthy` automatically (auto-sync is on).
-- **prod** apps (`*-prod`) → `OutOfSync` until you sync them by hand. **This is the
-  promotion gate**, not an error.
+- `app-of-apps-dev` → `Synced` / `Healthy`.
+- The 6 dev apps (`yolo-dev`, `agent-dev`, …) → `Synced` / `Healthy` automatically
+  (auto-sync is on). They adopt the existing `dev`-namespace workloads in place.
 
-> Applying `app-of-apps.yaml` is preferred over clicking **+ New App** in the UI —
+> Applying the parent app is preferred over clicking **+ New App** in the UI —
 > it's declarative, version-controlled, and recreatable.
 
-### Promote to prod (manual)
+## Step 6 — Promote to PROD (app-of-apps-prod)
 
-When you're ready to release to prod, sync each prod app from the UI **Sync**
-button, or from the CLI:
+When dev is proven and you're ready to release, promote by merging `dev` → `main`,
+then bootstrap the prod parent from a checkout of **`main`**:
+
+```bash
+# on the control-plane, in a checkout of the main branch:
+kubectl apply -f infra/k8s/argo/app-of-apps-prod.yaml
+```
+
+The 6 prod apps get **created** but are **manual-sync**, so they show `OutOfSync` and
+deploy nothing until you sync them by hand — **this is the promotion gate**, not an error:
 
 ```bash
 argocd app sync yolo-prod
@@ -184,7 +203,7 @@ argocd app sync agent-prod        # etc. per service
 
 ---
 
-## Step 6 — Verify prerequisites on the cluster
+## Step 7 — Verify prerequisites on the cluster
 
 - **`polyai-secrets` Secret** must exist in both `dev` and `prod` — every workload
   uses `envFrom.secretRef: polyai-secrets` (AWS creds, S3 bucket, …). It is

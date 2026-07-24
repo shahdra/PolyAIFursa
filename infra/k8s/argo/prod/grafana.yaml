@@ -1,14 +1,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: agent-prod
+  name: grafana-prod
   namespace: argocd
 spec:
   project: default
   source:
     repoURL: https://github.com/shahdra/PolyAIFursa
-    targetRevision: HEAD
-    path: infra/k8s/prod/agent
+    targetRevision: main
+    path: infra/k8s/prod/grafana
   destination:
     server: https://kubernetes.default.svc
     namespace: prod

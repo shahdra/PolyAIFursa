@@ -1,14 +1,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: yolo-dev
+  name: prometheus-dev
   namespace: argocd
 spec:
   project: default
   source:
     repoURL: https://github.com/shahdra/PolyAIFursa
-    targetRevision: HEAD
-    path: infra/k8s/dev/yolo
+    targetRevision: dev
+    path: infra/k8s/dev/prometheus
   destination:
     server: https://kubernetes.default.svc
     namespace: dev
