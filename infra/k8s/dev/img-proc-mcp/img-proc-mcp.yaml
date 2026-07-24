@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: img-proc-mcp
-          image: shahdra/img-proc-mcp-service:8877505feaeef2a1ff83bd02b559f3b8683e2f00
+          image: shahdra/img-proc-mcp-service:59e55eba438c016a5cd70805ea331abfa4b75894
           ports:
             - containerPort: 9000
           envFrom:
