@@ -4,11 +4,6 @@
 # touches the cluster directly (no SSH, no docker compose).
 name: Build & Push Yolo
 
-# Serialize the manifest commit-back across the four build workflows so their
-# concurrent `git push`es don't fail with non-fast-forward. One group per branch.
-concurrency:
-  group: manifest-commit-${{ github.ref }}
-
 on:
   push:
     branches:
@@ -71,6 +66,14 @@ jobs:
           # No-op safely if the tag was already current (e.g. re-run).
           git diff --cached --quiet && echo "no manifest change" && exit 0
           git commit -m "ci: bump yolo image to ${{ github.sha }} [skip ci]"
-          # Rebase on any concurrent bot commits before pushing.
-          git pull --rebase origin "${{ github.ref_name }}"
-          git push origin "HEAD:${{ github.ref_name }}"
+          # Push with rebase-retry: if another service's build pushed first,
+          # rebase onto it and retry rather than failing on non-fast-forward.
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin "${{ github.ref_name }}"
+            if git push origin "HEAD:${{ github.ref_name }}"; then
+              echo "pushed on attempt $attempt"; exit 0
+            fi
+            echo "push $attempt failed (likely concurrent push) - retrying"
+            sleep $((RANDOM % 5 + 1))
+          done
+          echo "push failed after 5 attempts" >&2; exit 1
