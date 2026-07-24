@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-of-apps
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shahdra/PolyAIFursa
+    targetRevision: HEAD
+    # Points at this same directory: applies every Application manifest here
+    # (all 12 per-service apps + this one). Bootstraps the whole tree at once.
+    path: infra/k8s/argo
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # Keep prune/selfHeal off so the parent only creates/updates the child
+      # Application objects and never deletes or fights them (incl. itself).
+      prune: false
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true

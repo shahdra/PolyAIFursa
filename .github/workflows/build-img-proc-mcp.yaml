@@ -1,18 +1,27 @@
-# Part III (containerization): builds and pushes the img-proc-mcp service
-# image on every change under services/img-proc-mcp/**. Runs independently of
-# the other three build-*.yaml workflows so touching one service never
-# rebuilds the others.
+# Part IV (GitOps): builds and pushes the img-proc-mcp image on every change
+# under services/img-proc-mcp/**, then commits the new image tag into the
+# matching K8s manifest. ArgoCD watches the repo and rolls out the change - CI
+# no longer touches the cluster directly (no SSH, no docker compose).
 name: Build & Push Img Proc MCP
+
+# Serialize the manifest commit-back across the four build workflows so their
+# concurrent `git push`es don't fail with non-fast-forward. One group per branch.
+concurrency:
+  group: manifest-commit-${{ github.ref }}
 
 on:
   push:
     branches:
       - dev
       - main
-    # Only fire when img-proc-mcp's own code changes - this is what makes
-    # each service independently buildable/deployable per the task requirement.
+    # Only fire when img-proc-mcp's own code changes - keeps each service
+    # independently buildable/deployable per the task requirement.
     paths:
       - "services/img-proc-mcp/**"
+
+# Needed by the commit-back job to push the manifest change with GITHUB_TOKEN.
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -32,53 +41,32 @@ jobs:
           context: services/img-proc-mcp
           push: true
           # Tag with the commit SHA so every build gets a unique, traceable
-          # tag - never "latest", never reused across builds (see task notes).
+          # tag - never "latest", never reused across builds.
           tags: shahdra/img-proc-mcp-service:${{ github.sha }}
 
-  # Deploys only the img-proc-mcp service to the dev box - `docker compose up
-  # -d img-proc-mcp` recreates just that one container, leaving agent/yolo/
-  # frontend/monitoring untouched. Mirrors deploy.yaml's existing dev/prod
-  # SSH-branch split.
-  deploy-dev:
-    needs: build   # don't deploy an image that failed to build/push
-    if: github.ref == 'refs/heads/dev'
+  # GitOps: bump the image tag in the correct env's manifest and commit it back.
+  # ArgoCD (auto-sync for dev, manual for prod) picks up the commit and syncs.
+  update-manifest:
+    needs: build   # don't point the manifest at an image that failed to push
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy img-proc-mcp to Dev instance
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
         with:
-          host: ${{ secrets.DEV_INSTANCE_IP }}
-          username: ubuntu
-          key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
-          envs: IMG_PROC_IMAGE_TAG
-          script: |
-            cd ~/PolyAIFursa
-            git fetch origin
-            git checkout -B dev origin/dev
-            docker compose up -d img-proc-mcp
-            # Old container is already replaced above, so its image is now
-            # unreferenced - safe to reclaim disk before it fills up.
-            docker image prune -af
-        env:
-          IMG_PROC_IMAGE_TAG: ${{ github.sha }}
+          ref: ${{ github.ref_name }}
 
-  deploy-prod:
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy img-proc-mcp to Prod instance
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.PROD_INSTANCE_IP }}
-          username: ubuntu
-          key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
-          envs: IMG_PROC_IMAGE_TAG
-          script: |
-            cd ~/PolyAIFursa
-            git fetch origin
-            git checkout -B main origin/main
-            docker compose up -d img-proc-mcp
-            docker image prune -af
-        env:
-          IMG_PROC_IMAGE_TAG: ${{ github.sha }}
+      - name: Update image tag in manifest
+        run: |
+          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
+          sed -i "s|image: shahdra/img-proc-mcp-service:.*|image: shahdra/img-proc-mcp-service:${{ github.sha }}|" \
+            "infra/k8s/$ENV/img-proc-mcp/img-proc-mcp.yaml"
+
+      - name: Commit and push
+        run: |
+          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "infra/k8s/$ENV/img-proc-mcp/img-proc-mcp.yaml"
+          git diff --cached --quiet && echo "no manifest change" && exit 0
+          git commit -m "ci: bump img-proc-mcp image to ${{ github.sha }} [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"

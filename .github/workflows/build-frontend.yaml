@@ -1,27 +1,34 @@
-# Part III (containerization): builds and pushes the frontend service image
-# on every change under services/frontend/**. Runs independently of the other
-# three build-*.yaml workflows so touching one service never rebuilds the others.
+# Part IV (GitOps): builds and pushes the frontend image on every change under
+# services/frontend/**, then commits the new image tag into the matching K8s
+# manifest. ArgoCD watches the repo and rolls out the change - CI no longer
+# touches the cluster directly (no SSH, no docker compose).
 #
-# Frontend is special among the four services: NEXT_PUBLIC_AGENT_URL gets
-# baked into the client-side JS bundle at build time (Next.js only reads
-# NEXT_PUBLIC_* vars at build time, never at runtime), and dev/prod need a
-# DIFFERENT baked-in URL (their own instance's agent endpoint). So unlike the
-# other three services, this workflow builds two distinct images per push -
-# one tagged "<sha>-dev", one "<sha>-prod" - rather than a single shared tag.
+# Frontend is special among the services: NEXT_PUBLIC_AGENT_URL is baked into
+# the client JS bundle at BUILD time (Next.js reads NEXT_PUBLIC_* only at build
+# time), and dev/prod need a DIFFERENT baked-in URL (their own agent endpoint).
+# So each env builds its own image tagged "<sha>-dev" / "<sha>-prod". A push is
+# only ever on one branch, so exactly one env's build+commit-back runs.
 name: Build & Push Frontend
+
+# Serialize the manifest commit-back across the four build workflows so their
+# concurrent `git push`es don't fail with non-fast-forward. One group per branch.
+concurrency:
+  group: manifest-commit-${{ github.ref }}
 
 on:
   push:
     branches:
       - dev
       - main
-    # Only fire when frontend's own code changes - this is what makes each
-    # service independently buildable/deployable per the task requirement.
+    # Only fire when frontend's own code changes - keeps each service
+    # independently buildable/deployable per the task requirement.
     paths:
       - "services/frontend/**"
-  # Lets this be re-run on demand (Actions tab -> "Run workflow", or
-  # `gh workflow run`) for redeploys that don't need a fresh image build.
   workflow_dispatch:
+
+# Needed by the commit-back job to push the manifest change with GITHUB_TOKEN.
+permissions:
+  contents: write
 
 jobs:
   build-dev:
@@ -42,11 +49,10 @@ jobs:
           context: services/frontend
           push: true
           # Bake in the dev instance's own agent URL at build time.
-          # the frontend uses this to know wher to send requests, for the agent in the dev instance 
           build-args: |
-            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:8000 
-          # -dev suffix (not just the bare sha) so this can never collide with
-          # a -prod build of the same commit that bakes in a different URL.
+            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:8000
+          # -dev suffix so this can never collide with a -prod build of the
+          # same commit that bakes in a different URL.
           tags: shahdra/frontend-service:${{ github.sha }}-dev
 
   build-prod:
@@ -66,54 +72,36 @@ jobs:
         with:
           context: services/frontend
           push: true
-          # the frontend uses this to know wher to send requests, for the agent in the prod instance 
           build-args: |
             NEXT_PUBLIC_AGENT_URL=http://${{ secrets.PROD_INSTANCE_IP }}:8000
           tags: shahdra/frontend-service:${{ github.sha }}-prod
 
-  # Deploys only the frontend service to the dev box - `docker compose up -d frontend`
-  # recreates just that one container, leaving agent/yolo/img-proc-mcp/monitoring
-  # untouched. Mirrors deploy.yaml's existing dev/prod SSH-branch split.
-  deploy-dev:
-    needs: build-dev   # don't deploy an image that failed to build/push
-    if: github.ref == 'refs/heads/dev'
+  # GitOps: bump the env-suffixed image tag in the correct manifest and commit
+  # it back. Only one of build-dev/build-prod runs per push (branch-gated), so
+  # `needs` on both is fine - the skipped one is treated as satisfied.
+  update-manifest:
+    needs: [build-dev, build-prod]
+    if: ${{ always() && (needs.build-dev.result == 'success' || needs.build-prod.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy frontend to Dev instance
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
         with:
-          host: ${{ secrets.DEV_INSTANCE_IP }}
-          username: ubuntu
-          key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
-          envs: FRONTEND_IMAGE_TAG
-          script: |
-            cd ~/PolyAIFursa
-            git fetch origin
-            git checkout -B dev origin/dev
-            docker compose up -d frontend
-            # Old container is already replaced above, so its image is now
-            # unreferenced - safe to reclaim disk before it fills up.
-            docker image prune -af
-        env:
-          FRONTEND_IMAGE_TAG: ${{ github.sha }}-dev
+          ref: ${{ github.ref_name }}
 
-  deploy-prod:
-    needs: build-prod
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy frontend to Prod instance
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.PROD_INSTANCE_IP }}
-          username: ubuntu
-          key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
-          envs: FRONTEND_IMAGE_TAG
-          script: |
-            cd ~/PolyAIFursa
-            git fetch origin
-            git checkout -B main origin/main
-            docker compose up -d frontend
-            docker image prune -af
-        env:
-          FRONTEND_IMAGE_TAG: ${{ github.sha }}-prod
+      - name: Update image tag in manifest
+        run: |
+          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
+          # Manifest tag carries the same -dev / -prod suffix as the built image.
+          sed -i "s|image: shahdra/frontend-service:.*|image: shahdra/frontend-service:${{ github.sha }}-$ENV|" \
+            "infra/k8s/$ENV/frontend/frontend.yaml"
+
+      - name: Commit and push
+        run: |
+          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "infra/k8s/$ENV/frontend/frontend.yaml"
+          git diff --cached --quiet && echo "no manifest change" && exit 0
+          git commit -m "ci: bump frontend image to ${{ github.sha }}-$ENV [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
