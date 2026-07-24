@@ -48,9 +48,12 @@ jobs:
         with:
           context: services/frontend
           push: true
-          # Bake in the dev instance's own agent URL at build time.
+          # Bake in the browser-reachable agent URL at build time: the worker
+          # node's Elastic IP (DEV_INSTANCE_IP secret) + the agent Service's dev
+          # NodePort (30800). Port 8000 is the in-cluster container port and is
+          # NOT reachable from the browser.
           build-args: |
-            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:8000
+            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:30800
           # -dev suffix so this can never collide with a -prod build of the
           # same commit that bakes in a different URL.
           tags: shahdra/frontend-service:${{ github.sha }}-dev
@@ -72,8 +75,9 @@ jobs:
         with:
           context: services/frontend
           push: true
+          # Worker EIP (PROD_INSTANCE_IP secret) + agent's prod NodePort (31800).
           build-args: |
-            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.PROD_INSTANCE_IP }}:8000
+            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.PROD_INSTANCE_IP }}:31800
           tags: shahdra/frontend-service:${{ github.sha }}-prod
 
   # GitOps: bump the env-suffixed image tag in the correct manifest and commit
