@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-of-apps-prod
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shahdra/PolyAIFursa
+    # Prod environment is deployed from the main branch.
+    targetRevision: main
+    # Only the prod child apps live here - keeps this parent from touching dev.
+    path: infra/k8s/argo/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # prune/selfHeal off: the parent only creates/updates the child
+      # Application objects; it must not delete or fight them.
+      prune: false
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=true

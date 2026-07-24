@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: grafana-prod
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shahdra/PolyAIFursa
+    targetRevision: main
+    path: infra/k8s/prod/grafana
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: prod
+  syncPolicy:
+    # Prod sync is intentionally manual - review before promoting.
+    syncOptions:
+      - CreateNamespace=true
