@@ -1,20 +1,23 @@
 # Part IV (GitOps): builds and pushes the yolo image on every change under
-# services/yolo/**, then commits the new image tag into the matching K8s
-# manifest. ArgoCD watches the repo and rolls out the change - CI no longer
-# touches the cluster directly (no SSH, no docker compose).
+# services/yolo/**, then commits the new image tag into the dev manifest.
+# ArgoCD watches the repo and rolls out the change - CI never touches the
+# cluster directly (no SSH, no docker compose).
+#
+# Builds run only on dev. Prod is promoted by merging dev -> main: the same
+# <sha> image tag rides along in the manifest, then you `argocd app sync
+# yolo-prod`. This keeps CI off the protected main branch entirely.
 name: Build & Push Yolo
 
 on:
   push:
     branches:
       - dev
-      - main
     # Only fire when yolo's own code changes - keeps each service independently
     # buildable/deployable per the task requirement.
     paths:
       - "services/yolo/**"
 
-# Needed by the commit-back job to push the manifest change with GITHUB_TOKEN.
+# Dev pushes the manifest bump directly to the (unprotected) dev branch.
 permissions:
   contents: write
 
@@ -39,40 +42,32 @@ jobs:
           # tag - never "latest", never reused across builds.
           tags: shahdra/yolo-service:${{ github.sha }}
 
-  # GitOps: bump the image tag in the correct env's manifest and commit it back.
-  # ArgoCD (auto-sync for dev, manual for prod) picks up the commit and syncs.
+  # GitOps: bump the image tag in the dev manifest and push it to the dev branch.
   update-manifest:
     needs: build   # don't point the manifest at an image that failed to push
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # Check out the branch tip (not the detached push SHA) so we can push back.
-          ref: ${{ github.ref_name }}
+          ref: dev
 
-      - name: Update image tag in manifest
+      - name: Update image tag in dev manifest
         run: |
-          # dev branch -> infra/k8s/dev, main branch -> infra/k8s/prod
-          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
           sed -i "s|image: shahdra/yolo-service:.*|image: shahdra/yolo-service:${{ github.sha }}|" \
-            "infra/k8s/$ENV/yolo/yolo.yaml"
+            infra/k8s/dev/yolo/yolo.yaml
 
-      - name: Commit and push
+      - name: Commit and push to dev
         run: |
-          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "infra/k8s/$ENV/yolo/yolo.yaml"
+          git add infra/k8s/dev/yolo/yolo.yaml
           # No-op safely if the tag was already current (e.g. re-run).
           git diff --cached --quiet && echo "no manifest change" && exit 0
           git commit -m "ci: bump yolo image to ${{ github.sha }} [skip ci]"
-          # Push with rebase-retry: if another service's build pushed first,
-          # rebase onto it and retry rather than failing on non-fast-forward.
+          # Rebase-retry: another service's build may have pushed to dev first.
           for attempt in 1 2 3 4 5; do
-            git pull --rebase origin "${{ github.ref_name }}"
-            if git push origin "HEAD:${{ github.ref_name }}"; then
-              echo "pushed on attempt $attempt"; exit 0
-            fi
+            git pull --rebase origin dev
+            if git push origin HEAD:dev; then echo "pushed on attempt $attempt"; exit 0; fi
             echo "push $attempt failed (likely concurrent push) - retrying"
             sleep $((RANDOM % 5 + 1))
           done

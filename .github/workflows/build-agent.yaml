@@ -1,23 +1,25 @@
 # Part IV (GitOps): builds and pushes the agent image on every change under
-# services/agent/**, then commits the new image tag into the matching K8s
-# manifest. ArgoCD watches the repo and rolls out the change - CI no longer
-# touches the cluster directly (no SSH, no docker compose).
+# services/agent/**, then commits the new image tag into the dev manifest.
+# ArgoCD watches the repo and rolls out the change - CI never touches the
+# cluster directly (no SSH, no docker compose).
+#
+# Builds run only on dev. Prod is promoted by merging dev -> main: the same
+# <sha> image tag rides along in the manifest, then you `argocd app sync
+# agent-prod`. This keeps CI off the protected main branch entirely.
 name: Build & Push Agent
 
 on:
   push:
     branches:
       - dev
-      - main
     # Only fire when agent's own code changes - keeps each service independently
     # buildable/deployable per the task requirement.
     paths:
       - "services/agent/**"
-  # Lets this be re-run on demand (Actions tab -> "Run workflow") to rebuild
-  # and re-pin the image without a code change.
+  # Manual re-run (Actions tab -> Run workflow) to rebuild without a code change.
   workflow_dispatch:
 
-# Needed by the commit-back job to push the manifest change with GITHUB_TOKEN.
+# Dev pushes the manifest bump directly to the (unprotected) dev branch.
 permissions:
   contents: write
 
@@ -42,40 +44,31 @@ jobs:
           # tag - never "latest", never reused across builds.
           tags: shahdra/agent-service:${{ github.sha }}
 
-  # GitOps: bump the image tag in the correct env's manifest and commit it back.
-  # ArgoCD (auto-sync for dev, manual for prod) picks up the commit and syncs.
+  # GitOps: bump the image tag in the dev manifest and push it to the dev branch.
   update-manifest:
     needs: build   # don't point the manifest at an image that failed to push
-    # workflow_dispatch has no branch push context we can commit back to reliably
-    # for prod/dev split, but github.ref_name still resolves to the dispatched
-    # branch, so the same env logic below works.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: dev
 
-      - name: Update image tag in manifest
+      - name: Update image tag in dev manifest
         run: |
-          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
           sed -i "s|image: shahdra/agent-service:.*|image: shahdra/agent-service:${{ github.sha }}|" \
-            "infra/k8s/$ENV/agent/agent.yaml"
+            infra/k8s/dev/agent/agent.yaml
 
-      - name: Commit and push
+      - name: Commit and push to dev
         run: |
-          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "infra/k8s/$ENV/agent/agent.yaml"
+          git add infra/k8s/dev/agent/agent.yaml
           git diff --cached --quiet && echo "no manifest change" && exit 0
           git commit -m "ci: bump agent image to ${{ github.sha }} [skip ci]"
-          # Push with rebase-retry: if another service's build pushed first,
-          # rebase onto it and retry rather than failing on non-fast-forward.
+          # Rebase-retry: another service's build may have pushed to dev first.
           for attempt in 1 2 3 4 5; do
-            git pull --rebase origin "${{ github.ref_name }}"
-            if git push origin "HEAD:${{ github.ref_name }}"; then
-              echo "pushed on attempt $attempt"; exit 0
-            fi
+            git pull --rebase origin dev
+            if git push origin HEAD:dev; then echo "pushed on attempt $attempt"; exit 0; fi
             echo "push $attempt failed (likely concurrent push) - retrying"
             sleep $((RANDOM % 5 + 1))
           done
