@@ -1,33 +1,32 @@
 # Part IV (GitOps): builds and pushes the frontend image on every change under
-# services/frontend/**, then commits the new image tag into the matching K8s
-# manifest. ArgoCD watches the repo and rolls out the change - CI no longer
-# touches the cluster directly (no SSH, no docker compose).
+# services/frontend/**, then commits the new image tag into the dev manifest.
+# ArgoCD watches the repo and rolls out the change - CI never touches the
+# cluster directly (no SSH, no docker compose).
 #
-# Frontend is special among the services: NEXT_PUBLIC_AGENT_URL is baked into
-# the client JS bundle at BUILD time (Next.js reads NEXT_PUBLIC_* only at build
-# time), and dev/prod need a DIFFERENT baked-in URL (their own agent endpoint).
-# So each env builds its own image tagged "<sha>-dev" / "<sha>-prod". A push is
-# only ever on one branch, so exactly one env's build+commit-back runs.
+# One image for all environments: the agent URL is resolved at RUNTIME in the
+# browser from window.location (see services/frontend/lib/api.ts), so there is
+# no per-env build arg and no -dev/-prod tag split. Builds run only on dev;
+# prod is promoted by merging dev -> main (the same <sha> tag rides along).
 name: Build & Push Frontend
 
 on:
   push:
+    # dev only - main is promoted via merge, not built here.
     branches:
       - dev
-      - main
     # Only fire when frontend's own code changes - keeps each service
     # independently buildable/deployable per the task requirement.
     paths:
       - "services/frontend/**"
+  # Manual re-run (Actions tab -> Run workflow) to rebuild without a code change.
   workflow_dispatch:
 
-# Needed by the commit-back job to push the manifest change with GITHUB_TOKEN.
+# Dev pushes the manifest bump directly to the (unprotected) dev branch.
 permissions:
   contents: write
 
 jobs:
-  build-dev:
-    if: github.ref == 'refs/heads/dev'
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,77 +37,40 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push frontend image (dev)
+      - name: Build and push frontend image
         uses: docker/build-push-action@v6
         with:
           context: services/frontend
           push: true
-          # Bake in the browser-reachable agent URL at build time: the worker
-          # node's Elastic IP (DEV_INSTANCE_IP secret) + the agent Service's dev
-          # NodePort (30800). Port 8000 is the in-cluster container port and is
-          # NOT reachable from the browser.
-          build-args: |
-            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.DEV_INSTANCE_IP }}:30800
-          # -dev suffix so this can never collide with a -prod build of the
-          # same commit that bakes in a different URL.
-          tags: shahdra/frontend-service:${{ github.sha }}-dev
+          # No NEXT_PUBLIC_AGENT_URL build-arg - the URL is derived at runtime.
+          # One plain <sha> tag works in dev and prod alike.
+          tags: shahdra/frontend-service:${{ github.sha }}
 
-  build-prod:
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push frontend image (prod)
-        uses: docker/build-push-action@v6
-        with:
-          context: services/frontend
-          push: true
-          # Worker EIP (PROD_INSTANCE_IP secret) + agent's prod NodePort (31800).
-          build-args: |
-            NEXT_PUBLIC_AGENT_URL=http://${{ secrets.PROD_INSTANCE_IP }}:31800
-          tags: shahdra/frontend-service:${{ github.sha }}-prod
-
-  # GitOps: bump the env-suffixed image tag in the correct manifest and commit
-  # it back. Only one of build-dev/build-prod runs per push (branch-gated), so
-  # `needs` on both is fine - the skipped one is treated as satisfied.
+  # GitOps: bump the image tag in the dev manifest and push it to the dev branch.
   update-manifest:
-    needs: [build-dev, build-prod]
-    if: ${{ always() && (needs.build-dev.result == 'success' || needs.build-prod.result == 'success') }}
+    needs: build   # don't point the manifest at an image that failed to push
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          ref: dev
 
-      - name: Update image tag in manifest
+      - name: Update image tag in dev manifest
         run: |
-          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
-          # Manifest tag carries the same -dev / -prod suffix as the built image.
-          sed -i "s|image: shahdra/frontend-service:.*|image: shahdra/frontend-service:${{ github.sha }}-$ENV|" \
-            "infra/k8s/$ENV/frontend/frontend.yaml"
+          sed -i "s|image: shahdra/frontend-service:.*|image: shahdra/frontend-service:${{ github.sha }}|" \
+            infra/k8s/dev/frontend/frontend.yaml
 
-      - name: Commit and push
+      - name: Commit and push to dev
         run: |
-          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "infra/k8s/$ENV/frontend/frontend.yaml"
+          git add infra/k8s/dev/frontend/frontend.yaml
           git diff --cached --quiet && echo "no manifest change" && exit 0
-          git commit -m "ci: bump frontend image to ${{ github.sha }}-$ENV [skip ci]"
-          # Push with rebase-retry: if another service's build pushed first,
-          # rebase onto it and retry rather than failing on non-fast-forward.
+          git commit -m "ci: bump frontend image to ${{ github.sha }} [skip ci]"
+          # Rebase-retry: another service's build may have pushed to dev first.
           for attempt in 1 2 3 4 5; do
-            git pull --rebase origin "${{ github.ref_name }}"
-            if git push origin "HEAD:${{ github.ref_name }}"; then
-              echo "pushed on attempt $attempt"; exit 0
-            fi
+            git pull --rebase origin dev
+            if git push origin HEAD:dev; then echo "pushed on attempt $attempt"; exit 0; fi
             echo "push $attempt failed (likely concurrent push) - retrying"
             sleep $((RANDOM % 5 + 1))
           done

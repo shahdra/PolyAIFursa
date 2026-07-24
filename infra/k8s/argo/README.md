@@ -224,20 +224,33 @@ argocd app sync agent-prod        # etc. per service
 
 ## How deploys flow now (GitOps)
 
-1. You push code to `dev` (or `main`) under `services/<svc>/**`.
-2. The matching `.github/workflows/build-<svc>.yaml` workflow:
+**Builds run on the `dev` branch only.** CI never touches the protected `main`
+branch or the cluster.
+
+**Dev (automatic):**
+1. Push code to the `dev` branch under `services/<svc>/**`.
+2. `.github/workflows/build-<svc>.yaml`:
    - builds & pushes `shahdra/<svc>-service:<sha>` to Docker Hub, then
-   - `sed`s that tag into `infra/k8s/<env>/<svc>/<svc>.yaml` and commits it back
-     with `[skip ci]` (a `concurrency` group serializes these commits so parallel
-     service builds don't clash on `git push`).
-3. ArgoCD sees the new commit:
-   - **dev** → auto-syncs and rolls out immediately.
-   - **prod** → shows `OutOfSync`; you sync it manually when ready.
+   - `sed`s that tag into `infra/k8s/dev/<svc>/<svc>.yaml` and pushes the bump
+     straight to `dev` (`[skip ci]`; a rebase-retry loop handles concurrent
+     per-service pushes).
+3. The `<svc>-dev` ArgoCD app (tracks `dev`, auto-sync) rolls it out immediately.
+
+**Prod (promote by merge, then manual sync):**
+1. Open a PR from `dev` → `main` and merge it (satisfies branch protection +
+   the `test` check). The already-bumped `<sha>` tags ride along into
+   `infra/k8s/prod/<svc>/<svc>.yaml`.
+2. The `<svc>-prod` ArgoCD app (tracks `main`, **manual-sync**) shows `OutOfSync`.
+3. Promote when ready: `argocd app sync <svc>-prod`.
+
+**Frontend is a single image for both envs.** The agent URL is resolved at
+runtime in the browser from `window.location` (agent NodePort = frontend
+NodePort + 500; see `services/frontend/lib/api.ts`) — no per-env build arg, no
+`-dev`/`-prod` tag split. It promotes by merge exactly like the others.
 
 The old SSH/`docker compose` deploy jobs and `deploy-monitoring.yaml` have been
-removed — **CI never touches the cluster directly anymore**. Monitoring config
-lives inline in the Prometheus/Grafana manifest ConfigMaps and syncs like any
-other manifest change (edit the manifest → commit → ArgoCD applies it).
+removed. Monitoring config lives inline in the Prometheus/Grafana manifest
+ConfigMaps and syncs like any other manifest change (edit → commit → sync).
 
 ## Troubleshooting
 

@@ -22,7 +22,10 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: shahdra/frontend-service:59e55eba438c016a5cd70805ea331abfa4b75894-dev
+          # Single image for all envs - agent URL is resolved at runtime in the
+          # browser (see services/frontend/lib/api.ts). CI bumps this to the new
+          # <sha> on each frontend build; prod inherits it via dev->main merge.
+          image: shahdra/frontend-service:1e980d1bbf85c9230598a37b0b9df76ca9ea8753
           ports:
             - containerPort: 3000
           # Next.js has no dedicated health route; probe the home page.
