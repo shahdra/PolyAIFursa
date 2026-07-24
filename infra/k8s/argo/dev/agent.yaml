@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: agent-dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/shahdra/PolyAIFursa
+    targetRevision: dev
+    path: infra/k8s/dev/agent
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

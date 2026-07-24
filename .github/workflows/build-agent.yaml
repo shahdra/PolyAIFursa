@@ -1,6 +1,7 @@
-# Part III (containerization): builds and pushes the agent service image on
-# every change under services/agent/**. Runs independently of the other three
-# build-*.yaml workflows so touching one service never rebuilds the others.
+# Part IV (GitOps): builds and pushes the agent image on every change under
+# services/agent/**, then commits the new image tag into the matching K8s
+# manifest. ArgoCD watches the repo and rolls out the change - CI no longer
+# touches the cluster directly (no SSH, no docker compose).
 name: Build & Push Agent
 
 on:
@@ -8,14 +9,17 @@ on:
     branches:
       - dev
       - main
-    # Only fire when agent's own code changes - this is what makes each
-    # service independently buildable/deployable per the task requirement.
+    # Only fire when agent's own code changes - keeps each service independently
+    # buildable/deployable per the task requirement.
     paths:
       - "services/agent/**"
-  # Lets this be re-run on demand (Actions tab -> "Run workflow", or
-  # `gh workflow run`) for changes that don't touch services/agent/** but
-  # still need a redeploy - e.g. compose-level env vars like ALLOWED_ORIGINS.
+  # Lets this be re-run on demand (Actions tab -> "Run workflow") to rebuild
+  # and re-pin the image without a code change.
   workflow_dispatch:
+
+# Needed by the commit-back job to push the manifest change with GITHUB_TOKEN.
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -35,54 +39,44 @@ jobs:
           context: services/agent
           push: true
           # Tag with the commit SHA so every build gets a unique, traceable
-          # tag - never "latest", never reused across builds (see task notes).
+          # tag - never "latest", never reused across builds.
           tags: shahdra/agent-service:${{ github.sha }}
 
-  # Deploys only the agent service to the dev box - `docker compose up -d agent`
-  # recreates just that one container, leaving yolo/frontend/img-proc-mcp/monitoring
-  # untouched. Mirrors deploy.yaml's existing dev/prod SSH-branch split.
-  deploy-dev:
-    needs: build   # don't deploy an image that failed to build/push
-    if: github.ref == 'refs/heads/dev'
+  # GitOps: bump the image tag in the correct env's manifest and commit it back.
+  # ArgoCD (auto-sync for dev, manual for prod) picks up the commit and syncs.
+  update-manifest:
+    needs: build   # don't point the manifest at an image that failed to push
+    # workflow_dispatch has no branch push context we can commit back to reliably
+    # for prod/dev split, but github.ref_name still resolves to the dispatched
+    # branch, so the same env logic below works.
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy agent to Dev instance
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v4
         with:
-          host: ${{ secrets.DEV_INSTANCE_IP }}
-          username: ubuntu
-          key: ${{ secrets.DEV_INSTANCE_SSH_KEY }}
-          envs: AGENT_IMAGE_TAG,ALLOWED_ORIGINS # exports these into the SSH session's shell for Compose to read
-          script: |
-            cd ~/PolyAIFursa
-            git fetch origin
-            git checkout -B dev origin/dev
-            docker compose up -d agent
-            # Old container is already replaced above, so its image is now
-            # unreferenced - safe to reclaim disk before it fills up.
-            docker image prune -af
-        env:
-          AGENT_IMAGE_TAG: ${{ github.sha }}
-          ALLOWED_ORIGINS: http://${{ secrets.DEV_INSTANCE_IP }}:3000
+          ref: ${{ github.ref_name }}
 
-  deploy-prod:
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy agent to Prod instance
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.PROD_INSTANCE_IP }}
-          username: ubuntu
-          key: ${{ secrets.PROD_INSTANCE_SSH_KEY }}
-          envs: AGENT_IMAGE_TAG,ALLOWED_ORIGINS
-          script: |
-            cd ~/PolyAIFursa
-            git fetch origin
-            git checkout -B main origin/main
-            docker compose up -d agent
-            docker image prune -af
-        env:
-          AGENT_IMAGE_TAG: ${{ github.sha }}
-          ALLOWED_ORIGINS: http://${{ secrets.PROD_INSTANCE_IP }}:3000
+      - name: Update image tag in manifest
+        run: |
+          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
+          sed -i "s|image: shahdra/agent-service:.*|image: shahdra/agent-service:${{ github.sha }}|" \
+            "infra/k8s/$ENV/agent/agent.yaml"
+
+      - name: Commit and push
+        run: |
+          ENV=$([ "${{ github.ref_name }}" = "main" ] && echo prod || echo dev)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "infra/k8s/$ENV/agent/agent.yaml"
+          git diff --cached --quiet && echo "no manifest change" && exit 0
+          git commit -m "ci: bump agent image to ${{ github.sha }} [skip ci]"
+          # Push with rebase-retry: if another service's build pushed first,
+          # rebase onto it and retry rather than failing on non-fast-forward.
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin "${{ github.ref_name }}"
+            if git push origin "HEAD:${{ github.ref_name }}"; then
+              echo "pushed on attempt $attempt"; exit 0
+            fi
+            echo "push $attempt failed (likely concurrent push) - retrying"
+            sleep $((RANDOM % 5 + 1))
+          done
+          echo "push failed after 5 attempts" >&2; exit 1

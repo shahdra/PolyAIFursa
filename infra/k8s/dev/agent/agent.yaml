@@ -31,10 +31,12 @@ spec:
               value: http://yolo-service:8080
             - name: IMG_PROC_MCP_URL
               value: http://img-proc-mcp-service:9000/mcp
-            # CORS: must match the browser origin the frontend is served from
-            # (frontend NodePort on the node's public IP). Set the real value here.
+            # CORS: allow all origins. The frontend calls the agent directly
+            # from the browser at whatever NodePort URL it's served from; "*"
+            # avoids having to track the worker IP here. Safe with this app's
+            # config (no credentials; allow_methods/headers are explicit).
             - name: ALLOWED_ORIGINS
-              value: http://44.211.138.37:30300
+              value: "*"
           envFrom:
             - secretRef:
                 name: polyai-secrets   # MODEL, AWS_*, AWS_S3_BUCKET, *_API_KEY
