@@ -27,6 +27,19 @@ output "control_plane_instance_id" {
   value       = module.k8s_cluster.control_plane_instance_id
 }
 
+output "control_plane_security_group_id" {
+  description = <<-EOT
+    Security group on the control plane. Handy for adding a temporary rule, e.g.
+    exposing the ArgoCD UI to your own IP — see infra/k8s/argo/README.md step 3.
+  EOT
+  value       = module.k8s_cluster.control_plane_security_group_id
+}
+
+output "worker_security_group_id" {
+  description = "Security group on the worker nodes."
+  value       = module.k8s_cluster.worker_security_group_id
+}
+
 output "worker_asg_name" {
   description = <<-EOT
     Worker Auto Scaling Group name. Scale down without a terraform apply:

@@ -17,11 +17,11 @@ FROM base AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# NEXT_PUBLIC_* vars are baked into the client JS bundle at build time, not
-# read at runtime - so the agent's URL must be supplied as a build arg per
-# environment (dev vs prod point at different instance IPs).
-ARG NEXT_PUBLIC_AGENT_URL
-ENV NEXT_PUBLIC_AGENT_URL=${NEXT_PUBLIC_AGENT_URL}
+# No NEXT_PUBLIC_AGENT_URL build arg. NEXT_PUBLIC_* vars are baked into the client
+# bundle at build time, which would mean one image per environment and a rebuild
+# every time a node's public IP changed. Instead lib/api.ts derives the agent URL
+# at runtime from window.location (agent NodePort = frontend NodePort + 500), so a
+# single image works in dev, prod, and on any IP.
 RUN npm run build
 
 FROM base AS runner
