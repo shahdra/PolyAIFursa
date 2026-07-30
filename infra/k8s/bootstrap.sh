@@ -210,12 +210,33 @@ fi
 # only. Ask EC2 instead, matching on the ASG's instance Name tag.
 WORKER_IP=""
 if command -v aws >/dev/null 2>&1; then
-  WORKER_IP="$(aws ec2 describe-instances \
-    --filters "Name=tag:Role,Values=worker" \
-              "Name=instance-state-name,Values=running" \
-    --query 'Reservations[].Instances[0].PublicIpAddress' \
-    --output text 2>/dev/null | head -n1 || true)"
-  [ "$WORKER_IP" = "None" ] && WORKER_IP=""
+  # Derive the cluster name from this node's own Cluster tag so the lookup below
+  # is scoped to OUR cluster. `Role=worker` alone would be account-wide, and this
+  # is a shared course account - another student using the same generic tag would
+  # have us print their node's IP.
+  IMDS_TOKEN="$(curl -fsSL -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)"
+  THIS_INSTANCE="$(curl -fsSL -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
+    "http://169.254.169.254/latest/meta-data/instance-id" 2>/dev/null || true)"
+
+  CLUSTER_TAG=""
+  if [ -n "$THIS_INSTANCE" ]; then
+    # shellcheck disable=SC2016  # backticks are JMESPath literals for --query,
+    # not command substitution; single quotes are required here.
+    CLUSTER_TAG="$(aws ec2 describe-instances --instance-ids "$THIS_INSTANCE" \
+      --query 'Reservations[0].Instances[0].Tags[?Key==`Cluster`].Value|[0]' \
+      --output text 2>/dev/null || true)"
+    [ "$CLUSTER_TAG" = "None" ] && CLUSTER_TAG=""
+  fi
+
+  if [ -n "$CLUSTER_TAG" ]; then
+    WORKER_IP="$(aws ec2 describe-instances \
+      --filters "Name=tag:Cluster,Values=${CLUSTER_TAG}" \
+                "Name=tag:Role,Values=worker" \
+                "Name=instance-state-name,Values=running" \
+      --query 'Reservations[].Instances[].PublicIpAddress' \
+      --output text 2>/dev/null | tr '\t' '\n' | grep -v '^None$' | head -n1 || true)"
+  fi
 fi
 
 echo

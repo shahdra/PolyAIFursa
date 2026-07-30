@@ -1,0 +1,201 @@
+# CD — build changed service images and bump their tags in the k8s manifests.
+#
+# Replaces the four near-identical build-<svc>.yaml workflows. They differed only
+# in three strings (path filter, image repo, manifest path), which is a matrix.
+#
+# GitOps: this workflow never touches the cluster. It builds an image, writes the
+# new tag into a manifest, and commits that. ArgoCD notices the commit and syncs.
+#
+# The two branches behave DIFFERENTLY, and the asymmetry is the design:
+#
+#   push to dev   -> bump infra/k8s/dev/<svc>/  -> commit pushed DIRECTLY to dev
+#                    (dev is unprotected; the <svc>-dev ArgoCD app auto-syncs, so
+#                    the change is live within a minute)
+#
+#   push to main  -> bump infra/k8s/prod/<svc>/ -> commit pushed to a SIDE BRANCH,
+#                    then a PR is opened against main
+#                    (main is a PROTECTED branch - see below)
+#
+# WHY main GETS A PR AND NEVER A DIRECT PUSH:
+# `main` is protected. `git push origin HEAD:main` from CI is rejected, and working
+# around that (bypass lists, admin PATs) would defeat the protection. It also
+# matches how this repo already works - every commit on main arrived via a merged
+# PR. So prod gets TWO gates: the PR review, and then the <svc>-prod ArgoCD app
+# being manual-sync. Nothing reaches prod without two deliberate human actions.
+#
+# WHY main IS A TRIGGER AT ALL, given promotion-by-merge already carries the tag:
+# it closes a real hole. A hotfix PR'd straight to main (bypassing dev) would
+# otherwise get no image build, leaving the prod manifest pointing at a tag that
+# was never pushed to Docker Hub -> ImagePullBackOff.
+name: CD
+
+on:
+  push:
+    branches: [dev, main]
+    paths:
+      - "services/**"
+      - ".github/workflows/cd.yaml"
+  # Manual rebuild without a code change (Actions tab -> Run workflow).
+  workflow_dispatch:
+
+permissions:
+  contents: write        # push the bump to dev, or push the PR side-branch for main
+  pull-requests: write   # `gh pr create` for the main -> prod promotion PR
+
+# Don't let two pushes to the same branch race each other's manifest commits.
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Which services actually changed? Avoids rebuilding all four on every push.
+  changes:
+    runs-on: ubuntu-latest
+    # Skip runs triggered by our own bump commits. Belt-and-braces: the bump only
+    # edits infra/k8s/** so the paths filter above already excludes it, and the
+    # commit message carries [skip ci].
+    if: github.actor != 'github-actions[bot]'
+    outputs:
+      services: ${{ steps.filter.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # Output is a JSON array of the keys that matched, e.g. ["agent","yolo"],
+          # which feeds the build matrix below.
+          filters: |
+            agent:
+              - 'services/agent/**'
+            frontend:
+              - 'services/frontend/**'
+            yolo:
+              - 'services/yolo/**'
+            img-proc-mcp:
+              - 'services/img-proc-mcp/**'
+
+  build-and-bump:
+    needs: changes
+    # An empty matrix is a workflow error, so skip the job entirely when nothing
+    # relevant changed (e.g. a README-only push under services/).
+    if: needs.changes.outputs.services != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      # One service failing to build must not cancel the others.
+      fail-fast: false
+      # Serialise: every leg commits a manifest bump to the SAME branch. Running
+      # one at a time removes the push race rather than relying on retries.
+      max-parallel: 1
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.services) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          # Full history so `git pull --rebase` has something to rebase onto.
+          fetch-depth: 0
+
+      # Branch -> environment mapping, resolved once.
+      - name: Resolve target environment
+        id: env
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "dir=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          push: true
+          # Commit SHA, never "latest": every build gets a unique, traceable tag
+          # and a rollback is just pointing the manifest at an older SHA.
+          tags: shahdra/${{ matrix.service }}-service:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Bump the image tag in the ${{ steps.env.outputs.dir }} manifest
+        run: |
+          MANIFEST="infra/k8s/${{ steps.env.outputs.dir }}/${{ matrix.service }}/${{ matrix.service }}.yaml"
+          IMAGE="shahdra/${{ matrix.service }}-service"
+
+          test -f "$MANIFEST" || { echo "::error::$MANIFEST not found"; exit 1; }
+
+          sed -i "s|image: $IMAGE:.*|image: $IMAGE:${{ github.sha }}|" "$MANIFEST"
+
+          # Fail loudly if sed matched nothing. A silent no-op here means ArgoCD
+          # keeps deploying the old image and nobody notices for days.
+          grep -q "image: $IMAGE:${{ github.sha }}" "$MANIFEST" \
+            || { echo "::error::sed did not update the image tag in $MANIFEST"; exit 1; }
+
+          echo "$MANIFEST -> $IMAGE:${{ github.sha }}"
+
+      # ---- dev: push straight to the branch (unprotected, auto-synced) --------
+      - name: Push the bump to dev
+        if: github.ref_name == 'dev'
+        run: |
+          MANIFEST="infra/k8s/dev/${{ matrix.service }}/${{ matrix.service }}.yaml"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$MANIFEST"
+          git diff --cached --quiet && { echo "manifest already at this tag"; exit 0; }
+
+          # [skip ci] so this bump commit does not retrigger this workflow.
+          git commit -m "ci: bump ${{ matrix.service }} image to ${{ github.sha }} [skip ci]"
+
+          # max-parallel:1 serialises the matrix, but a concurrent human push to
+          # dev can still land first - hence the rebase-retry.
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin dev
+            if git push origin HEAD:dev; then
+              echo "pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "push attempt $attempt failed - retrying"
+            sleep $(( (RANDOM % 5) + 1 ))
+          done
+          echo "::error::push to dev failed after 5 attempts"
+          exit 1
+
+      # ---- main: PR only. NEVER push to main - it is protected. ---------------
+      - name: Open a promotion PR against main
+        if: github.ref_name == 'main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MANIFEST="infra/k8s/prod/${{ matrix.service }}/${{ matrix.service }}.yaml"
+          BRANCH="ci/bump-prod-${{ matrix.service }}-${{ github.sha }}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$MANIFEST"
+          git diff --cached --quiet && { echo "prod manifest already at this tag"; exit 0; }
+
+          git commit -m "ci: bump ${{ matrix.service }} prod image to ${{ github.sha }} [skip ci]"
+
+          # Push the SIDE BRANCH (allowed), then let a human merge the PR.
+          git push origin "HEAD:refs/heads/$BRANCH"
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "ci: promote ${{ matrix.service }} to ${{ github.sha }}" \
+            --body "Automated prod image bump for \`${{ matrix.service }}\`.
+
+          Image \`shahdra/${{ matrix.service }}-service:${{ github.sha }}\` is built and pushed to Docker Hub.
+
+          After merging, the \`${{ matrix.service }}-prod\` ArgoCD Application goes \`OutOfSync\`
+          (it is manual-sync by design). Deploy it with:
+
+          \`\`\`
+          argocd app sync ${{ matrix.service }}-prod
+          \`\`\`"

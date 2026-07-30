@@ -1,0 +1,209 @@
+# Provision the Kubernetes cluster and bootstrap it. Manual trigger only.
+#
+# Two sequential jobs, per task006:
+#   1. provision - terraform apply for the selected region
+#   2. bootstrap - SSH into the control plane and idempotently install Calico,
+#                  the EBS CSI driver, namespaces, polyai-secrets, ArgoCD, and
+#                  one ArgoCD Application per microservice
+#
+# The bootstrap job is safe to re-run: infra/k8s/bootstrap.sh is idempotent, so
+# dispatching this workflow against an already-bootstrapped cluster is a no-op
+# rather than an error.
+#
+# WORKSPACE == REGION. Task006 provisions ONE cluster serving both dev and prod
+# (separated by Kubernetes namespaces), so the Terraform workspace identifies the
+# region, not the environment. Adding a region means adding
+# infra/tf/tfvars/<region>.tfvars - no code changes.
+#
+# NOTE on this course AWS account: a Lambda (aws-learning-budget-keeper-function)
+# stops every EC2 instance at 16:00 and 00:00 daily. A stopped kubeadm control
+# plane is NOT restartable - the new public IP invalidates the API server cert
+# SANs. Recovery is re-running this workflow, which takes ~10 minutes end to end.
+name: Provision Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "AWS region (needs a matching infra/tf/tfvars/<region>.tfvars)"
+        type: choice
+        default: us-east-1
+        options:
+          - us-east-1
+          - us-east-2
+          - eu-west-1
+      worker_desired_capacity:
+        description: "Desired worker nodes (0 parks the cluster to save cost)"
+        type: string
+        default: "1"
+      run_bootstrap:
+        description: "Run the bootstrap job after provisioning"
+        type: boolean
+        default: true
+
+# Never let two provisions of the same region run at once - they would fight over
+# the same Terraform state lock.
+concurrency:
+  group: cluster-${{ inputs.region }}
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    outputs:
+      control_plane_ip: ${{ steps.tf_out.outputs.control_plane_ip }}
+      cluster_name: ${{ steps.tf_out.outputs.cluster_name }}
+      worker_asg_name: ${{ steps.tf_out.outputs.worker_asg_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false   # so `terraform output -raw` is not wrapped in log noise
+
+      - name: Terraform init
+        working-directory: infra/tf
+        run: terraform init
+
+      - name: Select the workspace for this region
+        working-directory: infra/tf
+        # -or-create makes a first-ever deploy to a new region work with no
+        # manual setup. The workspace name must equal the region: main.tf has a
+        # precondition that fails the plan otherwise.
+        run: terraform workspace select -or-create "${{ inputs.region }}"
+
+      - name: Terraform plan
+        working-directory: infra/tf
+        run: |
+          terraform plan \
+            -var-file="tfvars/${{ inputs.region }}.tfvars" \
+            -var "worker_desired_capacity=${{ inputs.worker_desired_capacity }}" \
+            -out=tfplan
+
+      - name: Terraform apply
+        working-directory: infra/tf
+        # Apply the saved plan so what runs is exactly what was planned.
+        run: terraform apply -auto-approve tfplan
+
+      - name: Collect outputs
+        id: tf_out
+        working-directory: infra/tf
+        run: |
+          {
+            echo "control_plane_ip=$(terraform output -raw control_plane_public_ip)"
+            echo "cluster_name=$(terraform output -raw cluster_name)"
+            echo "worker_asg_name=$(terraform output -raw worker_asg_name)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        working-directory: infra/tf
+        run: |
+          {
+            echo "### Cluster provisioned"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Region | \`${{ inputs.region }}\` |"
+            echo "| Cluster | \`$(terraform output -raw cluster_name)\` |"
+            echo "| Control plane | \`$(terraform output -raw control_plane_public_ip)\` |"
+            echo "| Worker ASG | \`$(terraform output -raw worker_asg_name)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  bootstrap:
+    needs: provision              # sequential, per the task
+    if: inputs.run_bootstrap
+    runs-on: ubuntu-latest
+    env:
+      CP_IP: ${{ needs.provision.outputs.control_plane_ip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # The control plane is brand new, so its host key is unknown and (on a
+          # re-provision) the old key for a recycled IP would mismatch. Trust on
+          # first use is the pragmatic choice for a disposable lab cluster.
+          cat >> ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ConnectTimeout 20
+            ServerAliveInterval 30
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Wait for the control plane to finish initializing
+        run: |
+          # Poll for the sentinel that control-plane user-data touches as its very
+          # last step. Waiting on the FILE rather than on port 22 is the point:
+          # sshd accepts connections long before `kubeadm init` has finished, so
+          # polling the port would let bootstrap race ahead and fail.
+          for attempt in $(seq 1 60); do
+            if ssh -o BatchMode=yes "ubuntu@${CP_IP}" \
+                 'test -f /var/lib/cloud/control-plane-ready' 2>/dev/null; then
+              echo "control plane ready after $attempt attempt(s)"
+              exit 0
+            fi
+            echo "not ready yet (attempt $attempt/60); sleeping 15s"
+            sleep 15
+          done
+          echo "::error::control plane did not become ready within 15 minutes."
+          echo "Check /var/log/user-data.log on the instance."
+          exit 1
+
+      - name: Stage the polyai-secrets env file on the control plane
+        run: |
+          # These are the app credentials (MODEL, AWS_*, GOOGLE_API_KEY) that
+          # become the polyai-secrets Secret. Deliberately not in git.
+          printf '%s\n' "${{ secrets.POLYAI_ENV }}" > /tmp/polyai.env
+          test -s /tmp/polyai.env || { echo "::error::POLYAI_ENV secret is empty"; exit 1; }
+          scp /tmp/polyai.env "ubuntu@${CP_IP}:/tmp/polyai.env"
+          shred -u /tmp/polyai.env    # don't leave credentials on the runner
+
+      - name: Bootstrap the cluster (idempotent)
+        # REPO_REF is the branch bootstrap.sh clones on the node to read
+        # ebs-storage-class.yaml and the two app-of-apps parents. It is pinned to
+        # `dev` rather than github.ref_name so that dispatching this workflow from
+        # a feature branch cannot apply that branch's parent manifests to the
+        # cluster.
+        #
+        # This does NOT constrain which branch each environment deploys from:
+        # app-of-apps-dev.yaml pins targetRevision: dev and app-of-apps-prod.yaml
+        # pins targetRevision: main, so the child Applications always track the
+        # right branch regardless of what was cloned here.
+        run: |
+          ssh -o BatchMode=yes "ubuntu@${CP_IP}" \
+            "POLYAI_ENV_FILE=/tmp/polyai.env REPO_REF=dev bash -s" \
+            < infra/k8s/bootstrap.sh
+
+      - name: Remove the staged credentials from the node
+        if: always()   # run even if bootstrap failed - don't leave secrets behind
+        run: |
+          ssh -o BatchMode=yes "ubuntu@${CP_IP}" \
+            'shred -u /tmp/polyai.env 2>/dev/null || true'
+
+      - name: Cluster state
+        run: |
+          {
+            echo "### Cluster bootstrapped"
+            echo
+            echo '```'
+            ssh -o BatchMode=yes "ubuntu@${CP_IP}" 'kubectl get nodes' 2>&1 || true
+            echo '```'
+            echo
+            echo '```'
+            ssh -o BatchMode=yes "ubuntu@${CP_IP}" 'kubectl -n argocd get applications' 2>&1 || true
+            echo '```'
+            echo
+            echo "Prod Applications are \`OutOfSync\` by design - they are manual-sync."
+            echo "Promote with \`argocd app sync <service>-prod\`."
+          } >> "$GITHUB_STEP_SUMMARY"
