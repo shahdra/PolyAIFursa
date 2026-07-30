@@ -1,15 +1,14 @@
-# Grafana (prod namespace): provisioning ConfigMaps (datasource + dashboard
-# provider) + static EBS storage (PV/PVC) + Deployment + NodePort Service.
+# Grafana (dev namespace): provisioning ConfigMaps (datasource + dashboard
+# provider) + a dynamically provisioned EBS PVC + Deployment + NodePort Service.
 #
-# The dashboard JSON files are large, so they are NOT inlined here — create that
-# ConfigMap from the files at deploy time (see infra/k8s/DEPLOY.md):
-#   kubectl -n dev create configmap grafana-dashboards \
-#     --from-file=services/grafana/dashboards/
+# The dashboard JSON lives in grafana-dashboards-configmap.yaml, generated from
+# services/grafana/dashboards/ by infra/k8s/gen-grafana-dashboards.py. It is
+# committed rather than created by hand so ArgoCD can sync it like anything else.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-datasources
-  namespace: prod
+  namespace: dev
 data:
   datasource.yml: |
     apiVersion: 1
@@ -26,7 +25,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-dashboard-provider
-  namespace: prod
+  namespace: dev
 data:
   dashboards.yml: |
     apiVersion: 1
@@ -60,7 +59,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: grafana-pvc
-  namespace: prod
+  namespace: dev
 spec:
   accessModes:
     - ReadWriteOnce
@@ -75,7 +74,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: grafana
-  namespace: prod
+  namespace: dev
   labels:
     app: grafana
 spec:
@@ -132,7 +131,12 @@ spec:
             name: grafana-dashboard-provider
         - name: dashboards
           configMap:
-            name: grafana-dashboards      # created from files at deploy time
+            # Defined in grafana-dashboards-configmap.yaml (generated from
+            # services/grafana/dashboards/ by infra/k8s/gen-grafana-dashboards.py).
+            # It used to be created by hand with `kubectl create configmap
+            # --from-file`, which nothing runs under GitOps - the mount then
+            # failed with "configmap not found" and the pod never started.
+            name: grafana-dashboards
         - name: grafana-storage
           persistentVolumeClaim:
             claimName: grafana-pvc
@@ -141,7 +145,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: grafana-service
-  namespace: prod
+  namespace: dev
   labels:
     app: grafana
 spec:
@@ -151,4 +155,4 @@ spec:
   ports:
     - port: 3000
       targetPort: 3000
-      nodePort: 31301     # prod grafana — open http://<node-ip>:31301
+      nodePort: 30301     # dev grafana — open http://<node-ip>:30301
