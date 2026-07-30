@@ -21,27 +21,22 @@ data:
         static_configs:
           - targets: ['agent-service:8000']
 ---
-# Static PV pointing at the pre-created EBS volume for prod (us-east-1d).
-# Replace the volumeHandle with the prod prometheus EBS VolumeId.
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: prometheus-pv-prod
-spec:
-  capacity:
-    storage: 5Gi
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: ebs-sc
-  persistentVolumeReclaimPolicy: Retain
-  # claimRef pins this PV to the dev PVC so it can't be grabbed by prod.
-  claimRef:
-    namespace: prod
-    name: prometheus-pvc
-  csi:
-    driver: ebs.csi.aws.com
-    volumeHandle: vol-0e61a22095b9ca644
-    fsType: ext4
+# No static PersistentVolume here on purpose.
+#
+# This used to be a PV with a hardcoded `volumeHandle: vol-...` naming an EBS
+# volume from the old hand-built cluster. That breaks in two ways:
+#   1. An EBS volume lives in ONE availability zone. Workers are spread across
+#      two AZs by the ASG, so whenever the pod landed in the other AZ the attach
+#      failed with `InvalidVolume.ZoneMismatch` and the pod hung in
+#      ContainerCreating forever.
+#   2. A hardcoded volume ID cannot survive `terraform destroy` + recreate, which
+#      is exactly what task006's acceptance test does.
+#
+# The PVC below now provisions dynamically through the `ebs-sc` StorageClass,
+# whose volumeBindingMode is WaitForFirstConsumer: the volume is created only
+# once the pod is scheduled, in that pod's own AZ. Correct in any region.
+# (The old claimRef that isolated dev from prod is no longer needed - a
+# dynamically provisioned volume is bound to exactly one PVC by construction.)
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -55,7 +50,8 @@ spec:
   resources:
     requests:
       storage: 5Gi
-  volumeName: prometheus-pv-prod
+  # No volumeName: that would pin this claim to a specific pre-existing PV.
+  # Omitting it lets ebs-sc provision a fresh volume in the pod's AZ.
 ---
 apiVersion: apps/v1
 kind: Deployment
