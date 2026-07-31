@@ -110,18 +110,55 @@ kubectl wait --for=condition=Established --timeout=120s \
   crd/apiservers.operator.tigera.io \
   crd/tigerastatuses.operator.tigera.io
 
-# The Installation CR's ipPool MUST match `kubeadm init --pod-network-cidr`
-# (192.168.0.0/16). custom-resources.yaml defaults to exactly that; if you change
-# one, change both or pods never get addresses.
+# The Installation CR is written inline rather than fetched from upstream
+# custom-resources.yaml, for one important reason: `encapsulation`.
+#
+# Upstream defaults to VXLANCrossSubnet, which encapsulates pod traffic ONLY when
+# the two nodes are in different subnets and sends RAW pod-IP packets when they
+# share one. On AWS that raw path is silently dropped:
+#   * the VPC route table has no route for 192.168.0.0/16, and
+#   * the ENI source/destination check rejects packets whose source is a pod IP.
+#
+# Our ASG spans two subnets, so whether any given pair of nodes shares one is
+# luck. When they do, cross-node pod traffic dies - which shows up as DNS
+# timeouts ("lookup argocd-redis: i/o timeout") and CrashLoopBackOff for anything
+# that resolves a Service from a different node than CoreDNS.
+#
+# `encapsulation: VXLAN` always tunnels, so the underlay only ever sees node-IP
+# UDP traffic that AWS is happy to route. The cost is ~50 bytes of overhead per
+# packet, which is the right trade for correctness.
+#
+# ipPool cidr MUST match `kubeadm init --pod-network-cidr` (192.168.0.0/16 - set
+# in the Terraform module's pod_network_cidr variable). Change one, change both.
 #
 # Retry loop: even after the CRDs report Established, the aggregated discovery
-# cache in front of the API server can lag by a few seconds. Three attempts at
-# 10s covers it without masking a real error (the last failure still surfaces).
+# cache in front of the API server can lag a few seconds. Three attempts at 10s
+# covers it without masking a real error (the last failure still surfaces).
 for attempt in 1 2 3; do
-  if kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/custom-resources.yaml"; then
+  if kubectl apply -f - <<'CALICO_INSTALLATION'; then
+apiVersion: operator.tigera.io/v1
+kind: Installation
+metadata:
+  name: default
+spec:
+  calicoNetwork:
+    ipPools:
+      - name: default-ipv4-ippool
+        blockSize: 26
+        cidr: 192.168.0.0/16
+        encapsulation: VXLAN
+        natOutgoing: Enabled
+        nodeSelector: all()
+---
+apiVersion: operator.tigera.io/v1
+kind: APIServer
+metadata:
+  name: default
+spec: {}
+CALICO_INSTALLATION
     break
   fi
-  [ "$attempt" -eq 3 ] && fail "could not apply Calico custom-resources after 3 attempts"
+  [ "$attempt" -eq 3 ] && fail "could not apply the Calico Installation after 3 attempts"
   echo "  discovery cache still catching up; retrying in 10s (attempt $attempt/3)"
   sleep 10
 done
