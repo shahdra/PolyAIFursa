@@ -48,3 +48,27 @@ services/frontend/out/
 
 coverage.xml
 .dockerhub
+tasks/
+docs/
+
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+# Saved plan files: binary, environment-specific, and they can embed variable
+# values. Always regenerate with `terraform plan -out=tfplan`.
+tfplan
+*.tfplan
+*.tfvars
+*.tfvars.json
+# ...but DO track the non-secret per-region value files. These hold only a region
+# name, a key-pair name, and a worker count - no credentials.
+!infra/tf/tfvars/*.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc

@@ -1,0 +1,224 @@
+#!/bin/bash
+# Control-plane bootstrap. Runs ONCE, on first boot, as root.
+#
+# Terraform template variables (rendered by templatefile(), NOT shell vars):
+#   cluster_name, region, kubernetes_version, pod_network_cidr,
+#   join_command_param
+# (listed as bare names on purpose - writing them with dollar-brace here would
+#  make Terraform interpolate them into this very comment)
+#
+# IMPORTANT for anyone editing this file: it is a Terraform template, so every
+# shell variable reference must double the dollar sign - write $$ followed by
+# {VAR}, not a single dollar. A single-dollar reference is interpolated by
+# Terraform at plan time and fails with "vars map does not contain key ...".
+# This applies inside comments too: Terraform does not know '#' starts a comment.
+set -euxo pipefail
+
+# Log everything to a file AND the serial console. When an instance boots but the
+# cluster never comes up, `sudo cat /var/log/user-data.log` (or the EC2 console
+# output, if SSH never opens) is the only way to find out why.
+exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+echo "=== control-plane bootstrap starting: ${cluster_name} in ${region} ==="
+
+# ---------------------------------------------------------------------------
+# 1. Kernel prerequisites
+# ---------------------------------------------------------------------------
+# overlay: the filesystem driver container images are layered with.
+# br_netfilter: makes bridged traffic traverse iptables, which is how Service
+# routing and network policy are enforced.
+cat >/etc/modules-load.d/k8s.conf <<'EOF'
+overlay
+br_netfilter
+EOF
+modprobe overlay
+modprobe br_netfilter
+
+cat >/etc/sysctl.d/99-kubernetes.conf <<'EOF'
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+sysctl --system
+
+# kubelet refuses to start when swap is enabled. Ubuntu 22.04 AMIs normally have
+# none, but disable it defensively so a swap-enabled base image can't break boot.
+swapoff -a
+sed -i '/\sswap\s/ s/^\(.*\)$/#\1/g' /etc/fstab
+
+# ---------------------------------------------------------------------------
+# 2. Base packages
+# ---------------------------------------------------------------------------
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y apt-transport-https ca-certificates curl gpg jq unzip socat conntrack
+
+# ---------------------------------------------------------------------------
+# 3. AWS CLI v2 — needed to publish the join command to SSM
+# ---------------------------------------------------------------------------
+# Ubuntu's apt repo ships awscli v1, which is old enough to lack some SSM flags;
+# install v2 from source of truth.
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
+rm -rf /tmp/awscliv2.zip /tmp/aws
+aws --version
+
+# ---------------------------------------------------------------------------
+# 4. cri-o container runtime + kubeadm / kubelet / kubectl
+# ---------------------------------------------------------------------------
+# Both repos are versioned by the same K8S_MINOR series so the runtime and
+# kubelet stay compatible. pkgs.k8s.io is the current official location (the old
+# apt.kubernetes.io was retired).
+K8S_MINOR="${kubernetes_version}"
+
+install -d -m 0755 /etc/apt/keyrings
+
+curl -fsSL "https://pkgs.k8s.io/core:/stable:/$${K8S_MINOR}/deb/Release.key" \
+  | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/$${K8S_MINOR}/deb/ /" \
+  >/etc/apt/sources.list.d/kubernetes.list
+
+curl -fsSL "https://pkgs.k8s.io/addons:/cri-o:/stable:/$${K8S_MINOR}/deb/Release.key" \
+  | gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/stable:/$${K8S_MINOR}/deb/ /" \
+  >/etc/apt/sources.list.d/cri-o.list
+
+apt-get update -y
+apt-get install -y cri-o kubelet kubeadm kubectl
+
+# Pin the versions. Without this, an unattended-upgrade can bump kubelet on a
+# reboot and skew it against the control-plane version.
+apt-mark hold cri-o kubelet kubeadm kubectl
+
+systemctl enable --now crio
+systemctl enable kubelet
+
+# ---------------------------------------------------------------------------
+# 4b. Invalidate any stale join command from a previous control plane
+# ---------------------------------------------------------------------------
+# If this instance is REPLACING an earlier control plane, the SSM parameter still
+# holds that dead instance's private IP. A worker booting right now would read it,
+# try to join a terminated API server, and fail hard. Delete it before
+# `kubeadm init` so concurrent workers see "absent" (and keep polling) rather
+# than "present but wrong". Workers also liveness-probe the endpoint, so this is
+# belt-and-braces - but it closes the window much earlier.
+aws ssm delete-parameter --region "${region}" --name "${join_command_param}" \
+  >/dev/null 2>&1 && echo "deleted stale join command from a previous control plane" \
+  || echo "no pre-existing join command to clear"
+
+# ---------------------------------------------------------------------------
+# 5. kubeadm init
+# ---------------------------------------------------------------------------
+TOKEN=$(curl -fsSL -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+imds() { curl -fsSL -H "X-aws-ec2-metadata-token: $${TOKEN}" "http://169.254.169.254/latest/meta-data/$${1}"; }
+
+PRIVATE_IP=$(imds local-ipv4)
+PUBLIC_IP=$(imds public-ipv4)
+NODE_NAME=$(imds local-hostname)   # ip-10-0-x-y.<region>.compute.internal
+
+echo "=== kubeadm init: node=$${NODE_NAME} private=$${PRIVATE_IP} public=$${PUBLIC_IP} ==="
+
+# --apiserver-cert-extra-sans includes the PUBLIC ip so kubectl from CI or a
+# laptop passes TLS verification against the same cert the in-VPC clients use.
+# --pod-network-cidr must match Calico's ipPool or nodes never become Ready.
+kubeadm init \
+  --pod-network-cidr="${pod_network_cidr}" \
+  --apiserver-advertise-address="$${PRIVATE_IP}" \
+  --apiserver-cert-extra-sans="$${PUBLIC_IP},$${PRIVATE_IP}" \
+  --node-name="$${NODE_NAME}"
+
+# kubeconfig for root and for the ubuntu user, so both
+# `sudo kubectl ...` and a plain `ssh ubuntu@host kubectl ...` work.
+mkdir -p /root/.kube
+install -m 600 /etc/kubernetes/admin.conf /root/.kube/config
+
+mkdir -p /home/ubuntu/.kube
+install -o ubuntu -g ubuntu -m 600 /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+
+export KUBECONFIG=/etc/kubernetes/admin.conf
+
+# ---------------------------------------------------------------------------
+# 6. Publish the join command to SSM Parameter Store
+# ---------------------------------------------------------------------------
+# See the module's main.tf header for why SSM is used. The refresh script is
+# installed as a file so the cron job below and this first run share one
+# implementation.
+cat >/usr/local/bin/publish-join-command.sh <<'SCRIPT'
+#!/bin/bash
+# Mint a fresh kubeadm join token and publish it to SSM.
+# kubeadm tokens expire after 24h by default, so this runs on a cron: an ASG
+# scale-out days from now must still find a VALID token, not just any token.
+set -euo pipefail
+export KUBECONFIG=/etc/kubernetes/admin.conf
+# The join command embeds a live bootstrap token. Never echo it; only the fact
+# that it was published goes to the log.
+JOIN_COMMAND=$(kubeadm token create --print-join-command)
+aws ssm put-parameter \
+  --region "REGION_PLACEHOLDER" \
+  --name "JOIN_PARAM_PLACEHOLDER" \
+  --type SecureString \
+  --value "$JOIN_COMMAND" \
+  --overwrite >/dev/null
+echo "$(date -Is) published join command to SSM"
+SCRIPT
+
+# Substitute the Terraform-rendered values into the script. Done with sed rather
+# than by templating inside the heredoc so the heredoc can stay quoted ('SCRIPT'),
+# which prevents the shell from expanding $JOIN_COMMAND at write time.
+sed -i \
+  -e "s|REGION_PLACEHOLDER|${region}|g" \
+  -e "s|JOIN_PARAM_PLACEHOLDER|${join_command_param}|g" \
+  /usr/local/bin/publish-join-command.sh
+chmod 0755 /usr/local/bin/publish-join-command.sh
+
+# Run it once now so workers launching alongside this instance can join.
+# The script itself does not print the token; +x here keeps the outer trace from
+# expanding anything sensitive either.
+{ set +x; /usr/local/bin/publish-join-command.sh; set -x; } 2>/dev/null
+
+# Refresh twice a day, comfortably inside the 24h token TTL.
+cat >/etc/cron.d/kubeadm-token-refresh <<'EOF'
+# Republish a fresh kubeadm join token so ASG scale-outs can always join.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+0 */12 * * * root /usr/local/bin/publish-join-command.sh >>/var/log/publish-join.log 2>&1
+EOF
+chmod 0644 /etc/cron.d/kubeadm-token-refresh
+
+# ---------------------------------------------------------------------------
+# 7. Write an externally-reachable kubeconfig to disk (NOT to SSM)
+# ---------------------------------------------------------------------------
+# admin.conf points at the PRIVATE ip, which is unreachable from outside the VPC.
+# This copy rewrites the server URL to the public IP; the API server cert already
+# carries that IP in its SANs (step 5), so TLS verification still succeeds.
+#
+# Deliberately NOT published to SSM Parameter Store, for two reasons:
+#   1. A kubeconfig is ~5.4 KB and SSM Standard-tier parameters cap at 4096
+#      characters. Advanced tier lifts the cap but bills $0.05/parameter/month.
+#   2. It embeds cluster-admin client certs and a private key. This is a shared
+#      course account; the fewer places admin credentials live, the better.
+# The bootstrap job reaches the cluster over SSH and uses admin.conf directly,
+# so nothing needs this in SSM. Fetch it on demand instead:
+#   scp ubuntu@<control-plane-ip>:/home/ubuntu/kubeconfig-public.yaml .
+{
+  set +x   # keep cert/key material out of the traced log and console output
+  sed "s|https://$${PRIVATE_IP}:6443|https://$${PUBLIC_IP}:6443|" \
+    /etc/kubernetes/admin.conf >/home/ubuntu/kubeconfig-public.yaml
+  chown ubuntu:ubuntu /home/ubuntu/kubeconfig-public.yaml
+  chmod 600 /home/ubuntu/kubeconfig-public.yaml
+  set -x
+} 2>/dev/null
+
+# ---------------------------------------------------------------------------
+# 8. Ready sentinel
+# ---------------------------------------------------------------------------
+# The bootstrap job in cluster.yaml polls for this file. Polling a sentinel
+# rather than just port 22 means CI cannot race ahead of kubeadm init — SSH opens
+# long before the API server is up.
+touch /var/lib/cloud/control-plane-ready
+
+echo "=== control-plane bootstrap COMPLETE ==="
+echo "Nodes will report NotReady until a CNI is installed - that is expected."
+kubectl get nodes || true

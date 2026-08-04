@@ -1,0 +1,151 @@
+#!/bin/bash
+# Worker bootstrap. Runs ONCE, on first boot, as root, on every instance the ASG
+# launches.
+#
+# Terraform template variables (rendered by templatefile(), NOT shell vars):
+#   cluster_name, region, kubernetes_version, join_command_param
+# (listed as bare names on purpose - writing them with dollar-brace here would
+#  make Terraform interpolate them into this very comment)
+#
+# IMPORTANT for anyone editing this file: it is a Terraform template, so every
+# shell variable reference must double the dollar sign - write $$ followed by
+# {VAR}, not a single dollar. This applies inside comments too: Terraform does
+# not know '#' starts a comment.
+#
+# Steps 1-4 are identical to the control plane's (same runtime, same kubelet
+# version — a version skew here causes the join to fail). Step 5 is the part
+# unique to workers: fetch the join command from SSM and run it.
+set -euxo pipefail
+
+exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+echo "=== worker bootstrap starting: joining ${cluster_name} in ${region} ==="
+
+# ---------------------------------------------------------------------------
+# 1. Kernel prerequisites
+# ---------------------------------------------------------------------------
+cat >/etc/modules-load.d/k8s.conf <<'EOF'
+overlay
+br_netfilter
+EOF
+modprobe overlay
+modprobe br_netfilter
+
+cat >/etc/sysctl.d/99-kubernetes.conf <<'EOF'
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+sysctl --system
+
+swapoff -a
+sed -i '/\sswap\s/ s/^\(.*\)$/#\1/g' /etc/fstab
+
+# ---------------------------------------------------------------------------
+# 2. Base packages
+# ---------------------------------------------------------------------------
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y apt-transport-https ca-certificates curl gpg jq unzip socat conntrack
+
+# ---------------------------------------------------------------------------
+# 3. AWS CLI v2 — needed to read the join command from SSM
+# ---------------------------------------------------------------------------
+curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+unzip -q /tmp/awscliv2.zip -d /tmp
+/tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli
+rm -rf /tmp/awscliv2.zip /tmp/aws
+
+# ---------------------------------------------------------------------------
+# 4. cri-o + kubeadm / kubelet / kubectl
+# ---------------------------------------------------------------------------
+K8S_MINOR="${kubernetes_version}"
+
+install -d -m 0755 /etc/apt/keyrings
+
+curl -fsSL "https://pkgs.k8s.io/core:/stable:/$${K8S_MINOR}/deb/Release.key" \
+  | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/$${K8S_MINOR}/deb/ /" \
+  >/etc/apt/sources.list.d/kubernetes.list
+
+curl -fsSL "https://pkgs.k8s.io/addons:/cri-o:/stable:/$${K8S_MINOR}/deb/Release.key" \
+  | gpg --dearmor -o /etc/apt/keyrings/cri-o-apt-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/cri-o-apt-keyring.gpg] https://pkgs.k8s.io/addons:/cri-o:/stable:/$${K8S_MINOR}/deb/ /" \
+  >/etc/apt/sources.list.d/cri-o.list
+
+apt-get update -y
+apt-get install -y cri-o kubelet kubeadm kubectl
+apt-mark hold cri-o kubelet kubeadm kubectl
+
+systemctl enable --now crio
+systemctl enable kubelet
+
+# ---------------------------------------------------------------------------
+# 5. Fetch the join command from SSM and join the cluster
+# ---------------------------------------------------------------------------
+# This MUST be a retry loop, not a one-shot read. Four timings to survive:
+#   * first apply     - the ASG can launch this worker while the control plane is
+#                       still running `kubeadm init` (~2-3 min)
+#   * scale-out later - the parameter exists; first read succeeds immediately
+#   * control-plane replaced - the parameter is briefly ABSENT
+#   * control-plane replaced - the parameter is briefly STALE, still naming the
+#                       OLD control plane's private IP. This is the subtle one:
+#                       a plain "is it non-empty?" check passes on a stale value
+#                       and `kubeadm join` then times out against a dead IP,
+#                       killing this script. So we also probe that the endpoint
+#                       actually ANSWERS before trusting it.
+# 60 attempts x 15s = 15 minutes, comfortably longer than a cold kubeadm init.
+JOIN_COMMAND=""
+for attempt in $(seq 1 60); do
+  CANDIDATE=$(aws ssm get-parameter \
+      --region "${region}" \
+      --name "${join_command_param}" \
+      --with-decryption \
+      --query 'Parameter.Value' \
+      --output text 2>/dev/null) || CANDIDATE=""
+
+  if [ -n "$${CANDIDATE}" ] && [ "$${CANDIDATE}" != "None" ]; then
+    # Extract host:port from "kubeadm join <host>:<port> --token ..."
+    ENDPOINT=$(echo "$${CANDIDATE}" | awk '{print $3}')
+    HOST=$${ENDPOINT%%:*}
+    PORT=$${ENDPOINT##*:}
+
+    # Liveness probe: the API server answers TLS on 6443. If this endpoint is a
+    # stale control plane that has been terminated, the connection fails and we
+    # keep polling for the refreshed parameter instead of dying on a bad join.
+    if timeout 5 bash -c "</dev/tcp/$${HOST}/$${PORT}" 2>/dev/null; then
+      JOIN_COMMAND="$${CANDIDATE}"
+      echo "got a LIVE join endpoint ($${ENDPOINT}) on attempt $${attempt} of 60"
+      break
+    fi
+    echo "join command names $${ENDPOINT}, which is not answering (attempt $${attempt}/60) - likely stale; waiting for refresh"
+  else
+    echo "join command not published yet (attempt $${attempt}/60)"
+  fi
+
+  sleep 15
+done
+
+if [ -z "$${JOIN_COMMAND}" ]; then
+  echo "FATAL: no LIVE join command in SSM (${join_command_param}) after 15 minutes." >&2
+  echo "Check: (a) did the control plane finish kubeadm init? see its" >&2
+  echo "/var/log/user-data.log  (b) does this instance's IAM role allow" >&2
+  echo "ssm:GetParameter on that path?  (c) is the control-plane security" >&2
+  echo "group allowing 6443 from inside the VPC?" >&2
+  exit 1
+fi
+
+TOKEN=$(curl -fsSL -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+NODE_NAME=$(curl -fsSL -H "X-aws-ec2-metadata-token: $${TOKEN}" \
+  "http://169.254.169.254/latest/meta-data/local-hostname")
+
+echo "=== joining cluster as $${NODE_NAME} ==="
+
+# The join command from kubeadm already carries the API endpoint, token, and CA
+# cert hash. --node-name keeps the registered name consistent with the private
+# DNS name, which is what `kubectl delete node` will expect on scale-down.
+eval "$${JOIN_COMMAND} --node-name=$${NODE_NAME}"
+
+touch /var/lib/cloud/worker-joined
+echo "=== worker bootstrap COMPLETE: joined as $${NODE_NAME} ==="

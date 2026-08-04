@@ -15,25 +15,52 @@ to match. No more SSH-into-the-box `docker compose` deploys.
 Promotion model: merge `dev` → `main`. Dev deploys from the `dev` branch; promoting to
 prod means merging into `main`, then manually syncing the prod apps.
 
-## Cluster reference (this deployment)
+## Cluster reference — discover it, don't hardcode it
 
-| Node                | Instance              | Private IP     | Security group                       |
-|---------------------|-----------------------|----------------|--------------------------------------|
-| control-plane       | `i-0fe97cd46f415418b` | `10.0.1.195`   | `sg-0f6488261f10197b1` (control-sg)  |
-| worker              | `i-0d10765e29b9bd911` | `10.0.1.164`   | `sg-0a960d8dcd201bd93` (worker-sg)   |
+The cluster is Terraform-managed (`infra/tf/`) and **disposable**: instance IDs and
+public IPs change on every `terraform apply`. This section used to list them
+literally, which went stale the first time the cluster was rebuilt. Read them from
+Terraform instead:
 
-Ports already open (no SG changes needed for this runbook):
+```bash
+cd infra/tf
+terraform workspace select us-east-1        # workspace == region
 
-| Port          | Where (SG)   | Purpose                                             |
-|---------------|--------------|-----------------------------------------------------|
-| `22`          | both         | SSH                                                 |
-| `6443`        | control      | Kubernetes API server                               |
-| `8080`        | control      | ArgoCD UI via `kubectl port-forward` (see step 3)   |
-| `30000-32767` | worker       | NodePorts — how you reach frontend/agent/grafana    |
+terraform output                             # everything at once
+terraform output -raw control_plane_public_ip
+terraform output -raw worker_asg_name
+terraform output -raw ssh_command            # ready-to-paste ssh line
+```
+
+The worker's public IP is not a Terraform output (the ASG creates workers, so it
+changes on every scale event). Ask EC2:
+
+```bash
+aws ec2 describe-instances \
+  --filters "Name=tag:Cluster,Values=$(terraform output -raw cluster_name)" \
+            "Name=tag:Role,Values=worker" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[].Instances[].PublicIpAddress' --output text
+```
+
+> Filter on the `Cluster` tag, not just `Role=worker`. This is a **shared course
+> account** — a bare `Role=worker` filter can match another student's instance.
+
+Ports opened by the security groups in `infra/tf/modules/k8s-cluster/main.tf`:
+
+| Port          | Where         | Purpose                                          |
+|---------------|---------------|--------------------------------------------------|
+| `22`          | both          | SSH                                              |
+| `6443`        | control plane | Kubernetes API server                            |
+| all           | both          | intra-VPC (`10.0.0.0/16`) — kubelet, etcd, Calico |
+| `30000-32767` | worker        | NodePorts — frontend / agent / grafana           |
+
+> **Note:** `8080` is **not** open on the control plane. Reach the ArgoCD UI over an
+> SSH tunnel (Option A in step 3), which needs only port 22.
 
 > All `kubectl`/`argocd` commands below run **on the control-plane node**. SSH in first:
 > ```bash
-> ssh -i <your-key.pem> ubuntu@<control-plane-public-ip>
+> ssh -i <your-key.pem> ubuntu@$(cd infra/tf && terraform output -raw control_plane_public_ip)
 > ```
 
 ---
@@ -106,21 +133,34 @@ Only port `22` needs to be open (it already is). Nothing is exposed to the inter
 3. Browse to **`https://localhost:8080`** → accept the self-signed cert warning →
    log in as `admin` with the password from step 2.
 
-### Option B (quick, uses the already-open port 8080) — direct
+### Option B (direct, needs a temporary SG rule)
 
-The control-plane SG already allows `8080` from `0.0.0.0/0`, so you can bind the
-port-forward to all interfaces and hit the node's public IP directly.
+The old hand-built cluster left `8080` open to `0.0.0.0/0`, so you could bind the
+port-forward to all interfaces and browse straight to the node. The Terraform
+security groups **deliberately do not open 8080** — the ArgoCD UI is only
+password-protected, and this is a shared account, so exposing it to the internet
+by default is the wrong trade.
+
+Option A above needs no open port and is the recommended route. If you still want
+direct access, add the rule yourself, scoped to your own IP:
 
 ```bash
+cd infra/tf
+MY_IP="$(curl -s https://checkip.amazonaws.com)/32"
+
+aws ec2 authorize-security-group-ingress \
+  --group-id "$(terraform output -raw control_plane_security_group_id)" \
+  --protocol tcp --port 8080 --cidr "$MY_IP"
+
+# on the control plane:
 kubectl port-forward svc/argocd-server -n argocd 8080:443 --address 0.0.0.0
 ```
 
 Browse to **`https://<control-plane-public-ip>:8080`** → accept the cert → log in.
 
-> ⚠️ Option B exposes the UI to the whole internet (it's only password-protected).
-> For anything beyond a quick check, prefer Option A, or narrow the `8080` inbound
-> rule from `0.0.0.0/0` to your own IP (EC2 → Security Groups → `sg-0f6488261f10197b1`
-> → edit the port-8080 rule → Source = "My IP").
+Revoke it when you're done (`authorize` → `revoke`, same arguments). Note this is a
+manual change outside Terraform, so it vanishes on the next cluster rebuild — which
+is the intended behaviour, not a bug.
 
 ### (Optional) log in with the CLI instead of the browser
 

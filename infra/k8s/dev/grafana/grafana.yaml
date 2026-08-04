@@ -1,10 +1,9 @@
 # Grafana (dev namespace): provisioning ConfigMaps (datasource + dashboard
-# provider) + static EBS storage (PV/PVC) + Deployment + NodePort Service.
+# provider) + a dynamically provisioned EBS PVC + Deployment + NodePort Service.
 #
-# The dashboard JSON files are large, so they are NOT inlined here — create that
-# ConfigMap from the files at deploy time (see infra/k8s/DEPLOY.md):
-#   kubectl -n dev create configmap grafana-dashboards \
-#     --from-file=services/grafana/dashboards/
+# The dashboard JSON lives in grafana-dashboards-configmap.yaml, generated from
+# services/grafana/dashboards/ by infra/k8s/gen-grafana-dashboards.py. It is
+# committed rather than created by hand so ArgoCD can sync it like anything else.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -41,24 +40,20 @@ data:
         options:
           path: /var/lib/grafana/dashboards
 ---
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: grafana-pv-dev
-spec:
-  capacity:
-    storage: 2Gi
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: ebs-sc
-  persistentVolumeReclaimPolicy: Retain
-  claimRef:
-    namespace: dev
-    name: grafana-pvc
-  csi:
-    driver: ebs.csi.aws.com
-    volumeHandle: vol-0916cef27c5c52f76
-    fsType: ext4
+# No static PersistentVolume here on purpose.
+#
+# This used to be a PV with a hardcoded `volumeHandle: vol-...` naming an EBS
+# volume from the old hand-built cluster. That breaks in two ways:
+#   1. An EBS volume lives in ONE availability zone. Workers are spread across
+#      two AZs by the ASG, so whenever the pod landed in the other AZ the attach
+#      failed with `InvalidVolume.ZoneMismatch` and the pod hung in
+#      ContainerCreating forever.
+#   2. A hardcoded volume ID cannot survive `terraform destroy` + recreate, which
+#      is exactly what task006's acceptance test does.
+#
+# The PVC below now provisions dynamically through the `ebs-sc` StorageClass,
+# whose volumeBindingMode is WaitForFirstConsumer: the volume is created only
+# once the pod is scheduled, in that pod's own AZ. Correct in any region.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -72,7 +67,8 @@ spec:
   resources:
     requests:
       storage: 2Gi
-  volumeName: grafana-pv-dev
+  # No volumeName: that would pin this claim to a specific pre-existing PV.
+  # Omitting it lets ebs-sc provision a fresh volume in the pod's AZ.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -135,7 +131,12 @@ spec:
             name: grafana-dashboard-provider
         - name: dashboards
           configMap:
-            name: grafana-dashboards      # created from files at deploy time
+            # Defined in grafana-dashboards-configmap.yaml (generated from
+            # services/grafana/dashboards/ by infra/k8s/gen-grafana-dashboards.py).
+            # It used to be created by hand with `kubectl create configmap
+            # --from-file`, which nothing runs under GitOps - the mount then
+            # failed with "configmap not found" and the pod never started.
+            name: grafana-dashboards
         - name: grafana-storage
           persistentVolumeClaim:
             claimName: grafana-pvc
