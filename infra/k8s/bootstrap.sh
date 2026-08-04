@@ -104,11 +104,58 @@ kubectl apply --server-side --force-conflicts \
 #   ensure CRDs are installed first
 # `kubectl apply` does not wait for CRD establishment, and the failure is timing
 # dependent - it can pass by hand and fail in CI, or vice versa.
+#
+# Each CRD gets its OWN bounded retry loop rather than one multi-arg `kubectl
+# wait`, because of a subtle failure that killed a real run:
+#
+#   error: .status.conditions accessor error: <nil> is of the type <nil>,
+#          expected []interface{}
+#
+# `--server-side` apply returns as soon as the object is PERSISTED, but the API
+# server populates `.status` a moment later. In that window `.status.conditions`
+# is absent (nil), not an empty list - and `kubectl wait` cannot traverse a nil
+# field, so it EXITS NON-ZERO IMMEDIATELY instead of waiting. `--timeout` never
+# gets a chance to help, and `set -e` then kills the whole bootstrap.
+#
+# Two consequences drive the shape below:
+#   1. The nil-status error must be treated as "not ready yet", not as fatal -
+#      hence `|| true` semantics via the if/break, and 2>/dev/null to keep the
+#      transient accessor error out of the log.
+#   2. One CRD per `kubectl wait` call. With three names in a single call, a nil
+#      status on ANY of them fails the whole command even when the others are
+#      already Established - which is exactly what happened: apiservers and
+#      tigerastatuses reported "condition met" while installations errored.
+#
+# 24 attempts x 5s = up to 2 minutes per CRD. Establishment normally takes a
+# second or two; the generous bound only matters on a cold, loaded API server.
 echo "Waiting for Calico CRDs to be established..."
-kubectl wait --for=condition=Established --timeout=120s \
-  crd/installations.operator.tigera.io \
-  crd/apiservers.operator.tigera.io \
-  crd/tigerastatuses.operator.tigera.io
+for crd in \
+  installations.operator.tigera.io \
+  apiservers.operator.tigera.io \
+  tigerastatuses.operator.tigera.io
+do
+  established=0
+  for attempt in $(seq 1 24); do
+    if kubectl wait --for=condition=Established --timeout=10s "crd/$crd" 2>/dev/null; then
+      established=1
+      break
+    fi
+    # Distinguish "not created yet" from "created but status not populated" so a
+    # genuinely missing CRD is obvious in the log rather than looking like lag.
+    if kubectl get "crd/$crd" >/dev/null 2>&1; then
+      echo "  $crd exists but .status is not populated yet (attempt $attempt/24)"
+    else
+      echo "  $crd not registered yet (attempt $attempt/24)"
+    fi
+    sleep 5
+  done
+  [ "$established" -eq 1 ] || fail "CRD $crd never became Established.
+The tigera-operator manifest applied but this CRD did not converge. Check:
+  kubectl get crd | grep tigera
+  kubectl -n tigera-operator get pods
+  kubectl -n tigera-operator logs deploy/tigera-operator"
+  echo "  $crd Established"
+done
 
 # The Installation CR is written inline rather than fetched from upstream
 # custom-resources.yaml, for one important reason: `encapsulation`.
