@@ -111,3 +111,46 @@ variable "owner" {
   type        = string
   default     = "shahdra"
 }
+
+# --- task007: public ingress ------------------------------------------------
+
+variable "base_domain" {
+  description = <<-EOT
+    Shared Route 53 hosted zone. Looked up with a data source and NEVER managed
+    by this stack — every student in the account shares it, so a `terraform
+    destroy` here must not be able to delete it.
+  EOT
+  type        = string
+  default     = "fursa.click"
+}
+
+variable "subdomain" {
+  description = <<-EOT
+    Our slice of the shared zone. Everything is exposed under
+    <subdomain>.<base_domain>: shahdra.fursa.click (prod),
+    dev.shahdra.fursa.click, grafana.shahdra.fursa.click, and so on.
+  EOT
+  type        = string
+  default     = "shahdra"
+}
+
+variable "ingress_http_node_port" {
+  description = <<-EOT
+    NodePort the ingress-nginx controller's HTTP port is pinned to. The ALB
+    target group forwards here, so Terraform must know the port BEFORE the
+    controller exists — which is why it is pinned instead of auto-allocated.
+    Changing it means changing `controller.service.nodePorts.http` in
+    infra/k8s/bootstrap.sh in the same commit.
+  EOT
+  type        = number
+  default     = 30080
+}
+
+variable "alert_email" {
+  description = <<-EOT
+    Mailbox subscribed to the alerts SNS topic. AWS emails a confirmation link
+    on first apply; until it is clicked, SNS silently drops every alert.
+  EOT
+  type        = string
+  default     = "rayanshahd55@gmail.com"
+}

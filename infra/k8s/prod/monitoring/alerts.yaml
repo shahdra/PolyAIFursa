@@ -1,0 +1,132 @@
+# PrometheusRule — our own alerts on the agent and yolo metrics.
+#
+# The operator picks this up because values.yaml sets
+# ruleSelectorNilUsesHelmValues=false, and renders it into the rule ConfigMap
+# Prometheus loads. Check it landed with:
+#   kubectl -n prod get prometheusrule
+#   ...then Prometheus UI -> Alerts (should list all four, state Inactive)
+#
+# ── The metrics these are built on ──────────────────────────────────────────
+# Both services use prometheus-fastapi-instrumentator, which exposes
+#   http_requests_total{handler,method,status}
+#   http_request_duration_seconds_bucket{handler,le}
+# and the agent adds its own
+#   agent_chat_duration_seconds_bucket{status,le}   (see services/agent/app.py)
+#
+# ── `for:` is the difference between an alert and a pager that cries wolf ───
+# A rule with no `for:` fires on a single scrape. Every one of these requires
+# the condition to hold for a few minutes first, so a one-off blip during a
+# rolling deploy does not send mail. That is also the Pending -> Firing
+# transition task007 asks you to observe: the rule is PENDING for the whole
+# `for:` window, then FIRING.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: polyai-alerts
+  namespace: prod
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: polyai-agent
+      # How often the expressions below are evaluated.
+      interval: 30s
+      rules:
+        # ── CRITICAL: the agent is returning errors ──────────────────────────
+        # Ratio of 5xx responses to all responses over a 5-minute window.
+        # rate() over a counter, not increase(), so the value is per-second and
+        # the division is dimensionless.
+        #
+        # The traffic guard on the denominator matters: with no traffic at all,
+        # both sides are 0 and the expression is 0/0 = NaN, which never fires —
+        # but during a deploy the numerator can be non-zero while the
+        # denominator is still tiny, producing a 100% error rate off two
+        # requests. Requiring some traffic keeps that out of the inbox.
+        - alert: AgentHighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{namespace="prod", job="agent-service", status=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{namespace="prod", job="agent-service"}[5m]))
+            ) > 0.10
+            and
+            sum(rate(http_requests_total{namespace="prod", job="agent-service"}[5m])) > 0.05
+          for: 3m
+          labels:
+            severity: critical
+            namespace: prod
+          annotations:
+            summary: "Agent (prod) is failing more than 10% of requests"
+            description: >-
+              {{ $value | humanizePercentage }} of requests to the prod agent
+              returned 5xx over the last 5 minutes. Check
+              `kubectl -n prod logs deploy/agent --tail=100`.
+
+        # ── WARNING: the agent is slow ───────────────────────────────────────
+        # 95th percentile of the agent's own end-to-end /chat histogram. Uses
+        # the custom agent_chat_duration_seconds rather than the generic HTTP
+        # histogram because /chat time is dominated by the LLM and tool calls,
+        # which is what we actually care about.
+        #
+        # Warning, not critical: a slow answer is still an answer. Different
+        # severity is what task007 asks for, and it is also what lets a future
+        # Alertmanager route send criticals to a phone and warnings to email.
+        - alert: AgentHighLatency
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (
+                rate(agent_chat_duration_seconds_bucket{namespace="prod"}[5m])
+              )
+            ) > 20
+          for: 5m
+          labels:
+            severity: warning
+            namespace: prod
+          annotations:
+            summary: "Agent (prod) p95 /chat latency above 20s"
+            description: >-
+              p95 end-to-end /chat latency is {{ $value | humanizeDuration }}.
+              Usually the LLM or the yolo service; check AgentHighErrorRate and
+              YoloHighErrorRate before blaming the model.
+
+    - name: polyai-yolo
+      interval: 30s
+      rules:
+        # ── CRITICAL: object detection is broken ─────────────────────────────
+        - alert: YoloHighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{namespace="prod", job="yolo-service", status=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{namespace="prod", job="yolo-service"}[5m]))
+            ) > 0.10
+            and
+            sum(rate(http_requests_total{namespace="prod", job="yolo-service"}[5m])) > 0.05
+          for: 3m
+          labels:
+            severity: critical
+            namespace: prod
+          annotations:
+            summary: "Yolo (prod) is failing more than 10% of requests"
+            description: >-
+              {{ $value | humanizePercentage }} of requests to the prod yolo
+              service returned 5xx over the last 5 minutes.
+
+        # ── WARNING: a service disappeared ───────────────────────────────────
+        # `up` is synthesised by Prometheus for every target: 1 if the last
+        # scrape succeeded, 0 if it failed. This catches the case the two
+        # error-rate rules structurally CANNOT: a pod that is down serves no
+        # requests at all, so http_requests_total simply stops increasing and a
+        # ratio-based alert stays quiet forever.
+        - alert: PolyAIServiceDown
+          expr: up{namespace="prod", job=~"agent-service|yolo-service"} == 0
+          for: 2m
+          labels:
+            severity: warning
+            namespace: prod
+          annotations:
+            summary: "{{ $labels.job }} (prod) has been unreachable for 2 minutes"
+            description: >-
+              Prometheus cannot scrape {{ $labels.job }} at {{ $labels.instance }}.
+              The pod is down, crash-looping, or its Service has no ready endpoints.

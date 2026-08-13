@@ -188,6 +188,24 @@ resource "aws_iam_role_policy" "worker_ssm_read" {
   policy = data.aws_iam_policy_document.worker_ssm_read.json
 }
 
+# Alertmanager runs as a pod on a worker and publishes alerts to SNS. Rather
+# than mounting an access key into the cluster, it uses the node's instance
+# credentials via IMDS — so the permission belongs on the worker role, scoped to
+# the single topic Terraform created.
+data "aws_iam_policy_document" "worker_sns_publish" {
+  statement {
+    sid       = "PublishAlerts"
+    actions   = ["sns:Publish"]
+    resources = [var.alerts_sns_topic_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "worker_sns_publish" {
+  name   = "${var.cluster_name}-worker-sns"
+  role   = aws_iam_role.worker.id
+  policy = data.aws_iam_policy_document.worker_sns_publish.json
+}
+
 resource "aws_iam_instance_profile" "worker" {
   name = "${var.cluster_name}-worker"
   role = aws_iam_role.worker.name
