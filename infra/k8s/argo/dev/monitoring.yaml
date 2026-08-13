@@ -1,14 +1,17 @@
+# Our OWN monitoring CRs for dev: ServiceMonitors (scrape the agent and yolo
+# /metrics) and a PrometheusRule (the alerts). The kube-prometheus-stack chart
+# itself is installed by infra/k8s/bootstrap.sh, not by ArgoCD.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: grafana-dev
+  name: monitoring-dev
   namespace: argocd
 spec:
   project: default
   source:
     repoURL: https://github.com/shahdra/PolyAIFursa
     targetRevision: dev
-    path: infra/k8s/dev/grafana
+    path: infra/k8s/dev/monitoring
   destination:
     server: https://kubernetes.default.svc
     namespace: dev

@@ -134,4 +134,32 @@ module "k8s_cluster" {
 
   ssh_key_name     = var.ssh_key_name
   ssh_ingress_cidr = var.ssh_ingress_cidr
+
+  # Lets Alertmanager, running on a worker, publish to the alerts topic using
+  # the node's instance-profile credentials — no static keys in the cluster.
+  alerts_sns_topic_arn = aws_sns_topic.alerts.arn
+}
+
+# --- Public ingress ---------------------------------------------------------
+# ALB + ACM + Route 53 in front of the in-cluster ingress-nginx controller.
+# Separate module rather than more resources in k8s-cluster: the cluster can
+# exist without a front door (that is exactly task006), and keeping them apart
+# means `terraform destroy -target=module.ingress` takes the public surface down
+# without touching the cluster.
+module "ingress" {
+  source = "./modules/ingress"
+
+  cluster_name = local.cluster_name
+
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.public_subnets
+
+  worker_asg_name          = module.k8s_cluster.worker_asg_name
+  worker_security_group_id = module.k8s_cluster.worker_security_group_id
+
+  # MUST match controller.service.nodePorts.http in infra/k8s/bootstrap.sh.
+  ingress_http_node_port = var.ingress_http_node_port
+
+  base_domain = var.base_domain
+  subdomain   = var.subdomain
 }

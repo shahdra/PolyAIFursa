@@ -1,14 +1,16 @@
+# Ingress objects routing prod traffic from the ALB/ingress-nginx to the
+# frontend and agent Services. See infra/k8s/prod/ingress/ingress.yaml.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: grafana-prod
+  name: ingress-prod
   namespace: argocd
 spec:
   project: default
   source:
     repoURL: https://github.com/shahdra/PolyAIFursa
     targetRevision: main
-    path: infra/k8s/prod/grafana
+    path: infra/k8s/prod/ingress
   destination:
     server: https://kubernetes.default.svc
     namespace: prod

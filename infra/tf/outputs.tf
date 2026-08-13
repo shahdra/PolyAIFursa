@@ -78,6 +78,46 @@ output "public_subnet_ids" {
   value       = module.vpc.public_subnets
 }
 
+# --- task007: ingress & alerting -------------------------------------------
+
+output "alb_dns_name" {
+  description = <<-EOT
+    The ALB's own hostname. When a site is down, this tells you whether the
+    problem is DNS or the cluster:
+      curl -sk -H 'Host: grafana.<domain_root>' https://$(terraform output -raw alb_dns_name)
+  EOT
+  value       = module.ingress.alb_dns_name
+}
+
+output "domain_root" {
+  description = "Domain root everything is published under, e.g. shahdra.fursa.click."
+  value       = module.ingress.domain_root
+}
+
+output "urls" {
+  description = "Public HTTPS URLs for every exposed service."
+  value       = module.ingress.urls
+}
+
+output "ingress_target_group_arn" {
+  description = <<-EOT
+    Target group attached to the worker ASG. Check target health when the site
+    returns 503:
+      aws elbv2 describe-target-health --target-group-arn $(terraform output -raw ingress_target_group_arn)
+  EOT
+  value       = module.ingress.target_group_arn
+}
+
+output "alerts_sns_topic_arn" {
+  description = <<-EOT
+    Topic Alertmanager publishes to; referenced by infra/k8s/monitoring/values.yaml.
+    If alerts fire but no mail arrives, the subscription is probably still
+    unconfirmed:
+      aws sns list-subscriptions-by-topic --topic-arn $(terraform output -raw alerts_sns_topic_arn)
+  EOT
+  value       = aws_sns_topic.alerts.arn
+}
+
 output "ssh_command" {
   description = "Ready-to-paste SSH command for the control plane."
   value       = "ssh -i ${var.ssh_private_key_path} ubuntu@${module.k8s_cluster.control_plane_public_ip}"
