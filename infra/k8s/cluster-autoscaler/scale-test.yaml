@@ -1,0 +1,59 @@
+# Cluster Autoscaler proof (task007 Part III) — a workload deliberately too big
+# for the running nodes.
+#
+# NOT synced by ArgoCD and not in any app-of-apps: this is a manual test you
+# apply, watch, and delete. Left running it would hold an extra worker node
+# permanently, which is exactly the cost the task warns about.
+#
+#   kubectl apply -f infra/k8s/cluster-autoscaler/scale-test.yaml
+#   kubectl -n dev get pods -l app=scale-test -w      # Pending -> Running
+#   kubectl -n kube-system logs -f deploy/cluster-autoscaler-aws-cluster-autoscaler
+#   aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names <asg>
+#   kubectl delete -f infra/k8s/cluster-autoscaler/scale-test.yaml   # then scale-down
+#
+# ── Why `pause` and why these numbers ──────────────────────────────────────
+# The image is Kubernetes' own `pause` container: a few hundred KB that starts
+# instantly and does nothing. The point of this test is the SCHEDULER's view of
+# a Pod, and the scheduler only ever looks at `requests` — never at what the
+# container actually uses. So a pod that consumes nothing but REQUESTS 1500m is
+# a perfect, zero-cost way to make a node "full".
+#
+# 1500m against a t3.medium (2 vCPU, ~1930m allocatable) means exactly one of
+# these fits per node. With two workers already running the PolyAI stack and
+# kube-prometheus-stack, all three replicas cannot be placed — so at least one
+# stays Pending with "Insufficient cpu", which is the signal the autoscaler
+# acts on.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scale-test
+  namespace: dev
+  labels:
+    app: scale-test
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: scale-test
+  template:
+    metadata:
+      labels:
+        app: scale-test
+    spec:
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            requests:
+              cpu: 1500m
+              memory: 128Mi
+      # Spread the replicas across nodes so they cannot all be packed onto one
+      # freshly added node - otherwise a single new worker satisfies everything
+      # and the test proves less than it looks like it does.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: scale-test

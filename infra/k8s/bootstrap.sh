@@ -61,6 +61,7 @@ EBS_CSI_VERSION="release-1.31"
 HELM_VERSION="v3.16.3"
 INGRESS_NGINX_CHART_VERSION="4.11.3"      # controller v1.11.3
 KUBE_PROM_STACK_CHART_VERSION="65.5.1"    # Prometheus 2.55, Grafana 11.3
+CLUSTER_AUTOSCALER_CHART_VERSION="9.43.2" # cluster-autoscaler 1.31, matches k8s 1.31
 
 # --- config ----------------------------------------------------------------
 REPO_DIR="${REPO_DIR:-$HOME/PolyAIFursa}"
@@ -328,6 +329,7 @@ fi
 
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null
 helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx >/dev/null
+helm repo add autoscaler https://kubernetes.github.io/autoscaler >/dev/null
 helm repo update >/dev/null
 echo "  chart repos updated"
 
@@ -417,6 +419,30 @@ ACTUAL_PORT="$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
 [ "$ACTUAL_PORT" = "$INGRESS_HTTP_NODE_PORT" ] \
   || fail "ingress-nginx HTTP nodePort is $ACTUAL_PORT but the ALB target group expects $INGRESS_HTTP_NODE_PORT"
 echo "  HTTP NodePort pinned at $ACTUAL_PORT (matches the ALB target group)"
+
+# --- 8b. Cluster Autoscaler (task007 Part III, bonus) ----------------------
+step "8b/12 Cluster Autoscaler ($CLUSTER_AUTOSCALER_CHART_VERSION)"
+# Skipped rather than fatal when the cluster name is unknown: auto-discovery is
+# tag-based and needs the exact name, and a misconfigured autoscaler that
+# silently matches nothing is worse than not installing one.
+if [ -z "$CLUSTER_TAG" ]; then
+  echo "  SKIPPED - cluster name unknown, cannot configure ASG auto-discovery"
+else
+  CA_VALUES="$(mktemp)"
+  sed -e "s|__CLUSTER_NAME__|${CLUSTER_TAG}|g" \
+      -e "s|__AWS_REGION__|${AWS_REGION}|g" \
+      infra/k8s/cluster-autoscaler/values.yaml > "$CA_VALUES"
+
+  helm upgrade --install cluster-autoscaler autoscaler/cluster-autoscaler \
+    --namespace kube-system \
+    --version "$CLUSTER_AUTOSCALER_CHART_VERSION" \
+    --values "$CA_VALUES" \
+    --timeout 5m
+  rm -f "$CA_VALUES"
+
+  kubectl -n kube-system rollout status deploy/cluster-autoscaler-aws-cluster-autoscaler --timeout=180s
+  echo "  watching ASG tagged k8s.io/cluster-autoscaler/${CLUSTER_TAG}=owned"
+fi
 
 # --- 9. ArgoCD ------------------------------------------------------------
 step "9/12 ArgoCD ($ARGOCD_VERSION)"

@@ -143,6 +143,61 @@ resource "aws_iam_role_policy" "control_plane_ssm_write" {
   policy = data.aws_iam_policy_document.control_plane_ssm_write.json
 }
 
+# ── Cluster Autoscaler (task007 Part III) ──────────────────────────────────
+# The autoscaler Deployment is pinned to the CONTROL PLANE node (nodeSelector +
+# a toleration for the control-plane taint), so it authenticates with THIS role.
+#
+# Running it on a worker would be self-defeating: the autoscaler's job is to
+# terminate underutilised workers, and it would eventually be scheduled onto a
+# node it then decides to remove. The control plane is never a scale-down
+# candidate, so the controller cannot evict itself.
+data "aws_iam_policy_document" "control_plane_autoscaler" {
+  statement {
+    sid = "ReadAutoscalingAndEC2"
+    actions = [
+      "autoscaling:DescribeAutoScalingGroups",
+      "autoscaling:DescribeAutoScalingInstances",
+      "autoscaling:DescribeLaunchConfigurations",
+      "autoscaling:DescribeScalingActivities",
+      "autoscaling:DescribeTags",
+      "ec2:DescribeImages",
+      "ec2:DescribeInstanceTypes",
+      "ec2:DescribeLaunchTemplateVersions",
+      "ec2:GetInstanceTypesFromInstanceRequirements",
+      "eks:DescribeNodegroup",
+    ]
+    # Every one of these is a Describe/List with no resource-level ARN support,
+    # so "*" is the only value AWS accepts. The mutating actions below ARE
+    # scoped.
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "ScaleOwnAsgOnly"
+    actions = [
+      "autoscaling:SetDesiredCapacity",
+      "autoscaling:TerminateInstanceInAutoScalingGroup",
+    ]
+    resources = ["*"]
+
+    # Least privilege for the two actions that actually change anything: the
+    # autoscaler may only resize an ASG carrying OUR cluster's discovery tag.
+    # Without this, a bug (or a stray manifest) could resize another student's
+    # ASG in this shared account.
+    condition {
+      test     = "StringEquals"
+      variable = "autoscaling:ResourceTag/k8s.io/cluster-autoscaler/${var.cluster_name}"
+      values   = ["owned"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "control_plane_autoscaler" {
+  name   = "${var.cluster_name}-cluster-autoscaler"
+  role   = aws_iam_role.control_plane.id
+  policy = data.aws_iam_policy_document.control_plane_autoscaler.json
+}
+
 resource "aws_iam_instance_profile" "control_plane" {
   name = "${var.cluster_name}-control-plane"
   role = aws_iam_role.control_plane.name
@@ -472,6 +527,28 @@ resource "aws_autoscaling_group" "workers" {
     key                 = "Cluster"
     value               = var.cluster_name
     propagate_at_launch = true
+  }
+
+  # ── Cluster Autoscaler discovery tags ───────────────────────────────────
+  # The autoscaler is started with `--node-group-auto-discovery=asg:tag=...`
+  # rather than a hard-coded ASG name, and THESE tags are what it discovers.
+  # Both are required: the first marks the ASG as autoscaler-managed at all, the
+  # second says which cluster owns it — essential in a shared account where
+  # several students' ASGs carry the generic first tag.
+  #
+  # propagate_at_launch = false: these describe the GROUP, not the instances.
+  # Propagating them would put a "this node is autoscaler-owned" tag on every
+  # EC2 instance, which is noise the autoscaler never reads.
+  tag {
+    key                 = "k8s.io/cluster-autoscaler/enabled"
+    value               = "true"
+    propagate_at_launch = false
+  }
+
+  tag {
+    key                 = "k8s.io/cluster-autoscaler/${var.cluster_name}"
+    value               = "owned"
+    propagate_at_launch = false
   }
 
   # NOTE on desired_capacity and manual scaling.

@@ -202,53 +202,81 @@ ssh -i $KEY ubuntu@$CP 'kubectl -n argocd get applications'
 
 ## Step 7 — Open the app
 
-The worker's public IP isn't a Terraform output — the ASG replaces workers, so it
-changes. Ask EC2:
+Since task007 everything is published on **HTTPS** through an ALB, so there are no
+node ports to look up and no IP that changes when the ASG replaces a worker:
 
 ```bash
-export WORKER=$(aws ec2 describe-instances \
-  --filters "Name=tag:Cluster,Values=$(terraform output -raw cluster_name)" \
-            "Name=tag:Role,Values=worker" \
-            "Name=instance-state-name,Values=running" \
-  --query 'Reservations[].Instances[].PublicIpAddress' --output text)
-echo "worker: $WORKER"
+terraform output urls
 ```
-
-> Filter on the `Cluster` tag, not just `Role=worker` — this is a **shared account**
-> and a bare filter can match another student's node.
 
 | | URL |
 |---|---|
-| dev frontend | `http://$WORKER:30300` |
-| dev grafana | `http://$WORKER:30301` |
-| prod frontend | `http://$WORKER:31300` *(after `argocd app sync`)* |
-| prod grafana | `http://$WORKER:31301` |
+| prod frontend | `https://shahdra.fursa.click` *(after `argocd app sync`)* |
+| prod agent | `https://shahdra.fursa.click/chat` |
+| dev frontend | `https://dev.shahdra.fursa.click` |
+| dev agent | `https://dev.shahdra.fursa.click/chat` |
+| ArgoCD | `https://argocd.shahdra.fursa.click` |
+| Grafana | `https://grafana.shahdra.fursa.click` |
+| Prometheus | `https://prometheus.shahdra.fursa.click` *(basic auth)* |
+| Alertmanager | `https://alertmanager.shahdra.fursa.click` *(basic auth)* |
 
-The frontend finds the agent on its own — `lib/api.ts` derives the URL from
-`window.location` (agent port = frontend port + 500), so a changed IP needs no
-rebuild.
+Frontend and agent share a hostname on purpose: `lib/api.ts` falls back to the page's
+own origin when there is no explicit port, so `/chat` on the same host means no CORS
+and no rebuild when anything moves.
 
-<details>
-<summary>ArgoCD UI (needs an SSH tunnel)</summary>
-
-Port 8080 is deliberately **not** open — the UI is only password-protected and this
-is a shared account.
-
-```bash
-# terminal 1 — forward on the node
-ssh -i $KEY ubuntu@$CP 'kubectl port-forward svc/argocd-server -n argocd 8080:443'
-
-# terminal 2 — tunnel from your laptop
-ssh -i $KEY -L 8080:localhost:8080 ubuntu@$CP
-```
-
-Open **https://localhost:8080**, accept the self-signed cert. User `admin`, password:
+**Passwords.** All three are printed by `bootstrap.sh` on the run that CREATES them,
+and never again. ArgoCD's is recoverable; the other two are hashed or generated:
 
 ```bash
+# ArgoCD — user `admin`
 ssh -i $KEY ubuntu@$CP \
   'kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo'
+
+# Grafana — user `admin`
+ssh -i $KEY ubuntu@$CP \
+  'kubectl -n monitoring get secret grafana-admin -o jsonpath="{.data.admin-password}" | base64 -d; echo'
 ```
-</details>
+
+Prometheus/Alertmanager basic auth is stored as an apr1 hash and **cannot be read
+back**. To reset it to something you know:
+
+```bash
+ssh -i $KEY ubuntu@$CP 'PW=newpassword; kubectl -n monitoring create secret generic \
+  monitoring-basic-auth --from-literal=auth="polyai:$(openssl passwd -apr1 "$PW")" \
+  --dry-run=client -o yaml | kubectl apply -f -'
+```
+
+### If a hostname returns 503
+
+That is the ALB reporting no healthy targets — the load balancer is fine, nothing is
+answering behind it. In order:
+
+```bash
+# 1. Are the ASG instances passing the target-group health check?
+aws elbv2 describe-target-health \
+  --target-group-arn $(terraform output -raw ingress_target_group_arn)
+
+# 2. Is the ingress controller up, and on the port the target group expects (30080)?
+ssh -i $KEY ubuntu@$CP 'kubectl -n ingress-nginx get pods,svc'
+
+# 3. Bypass the ALB entirely - this isolates "broken ALB" from "broken cluster"
+curl -H 'Host: dev.shahdra.fursa.click' http://$WORKER:30080/
+```
+
+### One manual step: confirm the alert email
+
+Terraform creates the SNS topic and the email subscription, but **AWS requires the
+recipient to click a confirmation link** before it will deliver anything. Until then
+alerts fire, reach Alertmanager, and publish to SNS successfully — and no mail
+arrives, with nothing in any log to explain it.
+
+```bash
+aws sns list-subscriptions-by-topic --topic-arn $(terraform output -raw alerts_sns_topic_arn)
+```
+
+`PendingConfirmation` means go and click the link in your inbox. The confirmation
+survives `terraform destroy`, because the topic ARN is derived from the cluster name
+and comes back identical.
 
 <details>
 <summary>Run kubectl from your laptop instead of over SSH</summary>
