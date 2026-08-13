@@ -23,6 +23,18 @@
 # kube-prometheus-stack, all three replicas cannot be placed — so at least one
 # stays Pending with "Insufficient cpu", which is the signal the autoscaler
 # acts on.
+#
+# ── What you should expect to see ──────────────────────────────────────────
+# The ASG's max_size is 3, so this does NOT end with all three pods running.
+# It ends with the ASG at its ceiling and one pod still Pending:
+#
+#   ASG desired 2 -> 3, a new worker launches and joins (~6-8 min)
+#   one of the Pending pods is scheduled onto it
+#   the last pod stays Pending, and the autoscaler says why:
+#     NotTriggerScaleUp: pod didn't trigger scale-up: 1 max node group size reached
+#
+# That last line is not a failure — it is the autoscaler correctly refusing to
+# exceed the ASG limit Terraform set, and it is worth seeing at least once.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
