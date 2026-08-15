@@ -1,0 +1,88 @@
+# Helm values for the AWS Cluster Autoscaler (task007 Part III, bonus).
+#
+# What it does: watches for Pods stuck `Pending` because no node has room, and
+# raises the worker ASG's desired capacity. When nodes sit underutilised long
+# enough, it drains them and scales back down.
+#
+# Installed by infra/k8s/bootstrap.sh. __CLUSTER_NAME__ and __AWS_REGION__ are
+# substituted at install time, same as the monitoring values.
+
+# Auto-discovery by ASG TAG, not by name. The alternative (`autoscalingGroups:`
+# with an explicit name/min/max) would hard-code a name Terraform generates, and
+# drift the moment the cluster is renamed or rebuilt. The tags it looks for are
+# set on the ASG in infra/tf/modules/k8s-cluster/main.tf:
+#   k8s.io/cluster-autoscaler/enabled                = true
+#   k8s.io/cluster-autoscaler/<cluster_name>         = owned
+autoDiscovery:
+  clusterName: __CLUSTER_NAME__
+
+awsRegion: __AWS_REGION__
+
+# No access key and no IRSA (this is kubeadm, not EKS — there is no OIDC
+# provider). The pod runs on the control-plane node and picks up that node's
+# instance-role credentials through IMDS. Terraform grants that role
+# autoscaling:SetDesiredCapacity / TerminateInstanceInAutoScalingGroup,
+# conditioned on the ASG carrying our own discovery tag.
+rbac:
+  create: true
+
+# ── Pinned to the control plane ────────────────────────────────────────────
+# The autoscaler decides which workers to delete. Scheduled onto a worker, it
+# can be evicted by its own scale-down decision, which at best delays the
+# operation and at worst leaves the ASG mid-resize with no controller watching.
+# The control plane is never a scale-down candidate.
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+extraArgs:
+  # ── Timings, tuned DOWN for a lab ────────────────────────────────────────
+  # The defaults are deliberately conservative for production: 10 minutes of
+  # sustained underutilisation before a node is removed. That makes the
+  # scale-down half of the demo untestable in a class session, so both are cut
+  # to 2 minutes. In a real cluster, leave them at the defaults — aggressive
+  # scale-down thrashes nodes and repeatedly disrupts pods.
+  scale-down-unneeded-time: 2m
+  scale-down-delay-after-add: 2m
+  scale-down-unready-time: 2m
+
+  # Percentage-of-requests below which a node counts as "unneeded". The default
+  # is 0.5; nudged up because this cluster's workloads request far less CPU than
+  # they use, so a genuinely idle node can still show ~50% requested.
+  scale-down-utilization-threshold: "0.5"
+
+  # ── Two safety valves that must be OFF for scale-down to work here ───────
+  # By default the autoscaler refuses to remove a node running ANY pod in
+  # kube-system without a controller, or any pod with local storage. On this
+  # cluster that describes the node-exporter DaemonSet and several
+  # kube-prometheus-stack pods, so with the defaults scale-down NEVER happens
+  # and the demo silently fails with nothing in the log but "not eligible".
+  #
+  # This is a lab-safe relaxation, not a general recommendation.
+  skip-nodes-with-system-pods: false
+  skip-nodes-with-local-storage: false
+
+  balance-similar-node-groups: true
+
+  # Log every scale decision and why. Without this, "nothing happened" is
+  # indistinguishable from "decided not to act", which is most of the debugging.
+  v: 4
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Expose the autoscaler's own metrics to the kube-prometheus-stack Prometheus,
+# so scale events show up alongside everything else.
+serviceMonitor:
+  enabled: true
+  namespace: monitoring
+  selector:
+    release: kube-prometheus-stack

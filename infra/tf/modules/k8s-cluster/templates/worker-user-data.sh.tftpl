@@ -140,7 +140,46 @@ TOKEN=$(curl -fsSL -X PUT "http://169.254.169.254/latest/api/token" \
 NODE_NAME=$(curl -fsSL -H "X-aws-ec2-metadata-token: $${TOKEN}" \
   "http://169.254.169.254/latest/meta-data/local-hostname")
 
-echo "=== joining cluster as $${NODE_NAME} ==="
+# --- provider ID (required by the Cluster Autoscaler) -----------------------
+# This cluster runs kubelet WITHOUT an AWS cloud provider, so nothing populates
+# Node.spec.providerID and it stays empty. That is fine for everything except
+# the Cluster Autoscaler, which uses providerID as the ONLY link between a
+# Kubernetes Node and the EC2 instance backing it.
+#
+# The failure it causes is subtle and looks like the autoscaler simply not
+# working. With no providerID the autoscaler cannot match the ASG's registered
+# instances to any Node, so it treats them as nodes that have not joined YET —
+# "upcoming" — and reasons that the Pending pods will be scheduled once those
+# imaginary nodes arrive. The log says:
+#
+#   Failed to check cloud provider has instance for ip-10-0-x-y: wrong id:
+#     expected format aws:///<zone>/<name>, got
+#   Pod dev/scale-test-... can be moved to template-node-for-...-upcoming-0
+#   No unschedulable pods
+#
+# ...and the ASG is never resized. Scale-DOWN is broken for the same reason:
+# the autoscaler cannot name the instance it wants to terminate.
+#
+# Setting --provider-id on kubelet gives it that link. The format is exactly
+# aws:///<availability-zone>/<instance-id>.
+INSTANCE_ID=$(curl -fsSL -H "X-aws-ec2-metadata-token: $${TOKEN}" \
+  "http://169.254.169.254/latest/meta-data/instance-id")
+AZ=$(curl -fsSL -H "X-aws-ec2-metadata-token: $${TOKEN}" \
+  "http://169.254.169.254/latest/meta-data/placement/availability-zone")
+PROVIDER_ID="aws:///$${AZ}/$${INSTANCE_ID}"
+
+# Written as a systemd drop-in rather than passed to `kubeadm join`, because
+# kubelet must carry this flag on EVERY start, not just the one during the
+# join. A flag given only at join time is lost on the first reboot, and the
+# Node object is not re-created — so providerID silently stays empty.
+mkdir -p /etc/systemd/system/kubelet.service.d
+cat > /etc/systemd/system/kubelet.service.d/20-provider-id.conf <<EOF
+[Service]
+Environment="KUBELET_EXTRA_ARGS=--provider-id=$${PROVIDER_ID}"
+EOF
+systemctl daemon-reload
+
+echo "=== joining cluster as $${NODE_NAME} (providerID $${PROVIDER_ID}) ==="
 
 # The join command from kubeadm already carries the API endpoint, token, and CA
 # cert hash. --node-name keeps the registered name consistent with the private

@@ -1,0 +1,246 @@
+# Helm values for prometheus-community/kube-prometheus-stack.
+#
+# Installed by infra/k8s/bootstrap.sh:
+#   helm upgrade --install kube-prometheus-stack \
+#     prometheus-community/kube-prometheus-stack \
+#     -n monitoring --create-namespace -f infra/k8s/monitoring/values.yaml
+#
+# This replaces the hand-written Prometheus and Grafana Deployments that used to
+# live in infra/k8s/dev|prod. What we get for free by switching to the chart:
+# the Prometheus Operator (so scrape config is a ServiceMonitor CR instead of a
+# ConfigMap nobody remembers to reload), Alertmanager, node-exporter,
+# kube-state-metrics, and ~30 Kubernetes dashboards already provisioned.
+#
+# ── PLACEHOLDERS ────────────────────────────────────────────────────────────
+# Three values cannot be committed literally because they are only known after
+# `terraform apply`. bootstrap.sh substitutes them with sed into a temp copy
+# before running helm:
+#   __ALERTS_SNS_TOPIC_ARN__   terraform output -raw alerts_sns_topic_arn
+#   __AWS_REGION__             the region the cluster runs in
+#   __DOMAIN_ROOT__            terraform output -raw domain_root
+# A bare `helm install -f` on this file WILL fail on them — deliberately, so a
+# half-configured Alertmanager can never reach the cluster silently.
+
+# ---------------------------------------------------------------------------
+# Prometheus
+# ---------------------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    # task007: 30 days of history on a 3Gi EBS volume.
+    retention: 30d
+    # Hard ceiling as well as a time one: if 30 days of samples would outgrow
+    # the 3Gi volume, Prometheus drops the oldest blocks instead of wedging the
+    # pod on a full disk. Sized under 3Gi to leave room for the WAL.
+    retentionSize: 2GB
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ebs-sc
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 3Gi
+
+    # ── The single most important pair of settings in this file ──────────────
+    # By default the operator only selects ServiceMonitors/PrometheusRules that
+    # carry `release: kube-prometheus-stack`. Our own CRs live in the dev and
+    # prod namespaces and are applied by ArgoCD, so making every one of them
+    # remember that label is a trap. Setting these to false makes the operator
+    # select ALL ServiceMonitors, PodMonitors and PrometheusRules in the
+    # cluster. That is why the agent/yolo ServiceMonitors are picked up.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+
+    # Behind the ALB at https://prometheus.<domain>. Prometheus builds absolute
+    # URLs (alert "Source" links, the Alertmanager `generatorURL`) from this; it
+    # would otherwise emit an unreachable http://<pod-ip>:9090 link.
+    externalUrl: https://prometheus.__DOMAIN_ROOT__
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        memory: 1Gi
+
+# ---------------------------------------------------------------------------
+# Alertmanager
+# ---------------------------------------------------------------------------
+alertmanager:
+  alertmanagerSpec:
+    externalUrl: https://alertmanager.__DOMAIN_ROOT__
+    # No persistence: Alertmanager state is silences and notification history.
+    # Losing them on a restart costs nothing here, and it saves an EBS volume.
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+
+  # Full Alertmanager configuration. The chart renders this into the
+  # alertmanager-kube-prometheus-stack-alertmanager Secret.
+  config:
+    global:
+      # How long after the last "firing" scrape an alert is declared resolved.
+      resolve_timeout: 5m
+
+    route:
+      # Group by alert AND namespace, so a dev failure and the same failure in
+      # prod arrive as two separate emails rather than one merged one.
+      group_by: ["alertname", "namespace"]
+      # Wait for siblings before sending the first notification of a group.
+      group_wait: 30s
+      # ...and between subsequent notifications for that same group.
+      group_interval: 5m
+      # Re-notify about a still-firing alert this often. 4h rather than the
+      # 12h default: an alert that stays broken all day should nag.
+      repeat_interval: 4h
+      receiver: sns
+
+      routes:
+        # Watchdog is an alert that fires ALWAYS, by design — it exists so you
+        # can detect that the alerting pipeline itself has died. Emailing it
+        # every 4h would train you to ignore the inbox, so it is black-holed.
+        - receiver: "null"
+          matchers:
+            - alertname = "Watchdog"
+
+    receivers:
+      - name: "null"
+
+      - name: sns
+        sns_configs:
+          # Native SNS receiver — no bridge service in between.
+          - topic_arn: __ALERTS_SNS_TOPIC_ARN__
+            send_resolved: true
+            sigv4:
+              region: __AWS_REGION__
+              # No access_key/secret_key on purpose. The SDK falls back to the
+              # EC2 instance metadata service and picks up the worker node's
+              # instance-role credentials, which Terraform granted sns:Publish
+              # on this topic. See infra/tf/alerts.tf.
+            # The email's subject line. Includes the state so RESOLVED mails are
+            # distinguishable at a glance in the inbox.
+            subject: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }} ({{ .CommonLabels.severity }})'
+            message: |-
+              {{ .Status | toUpper }}: {{ .Alerts | len }} alert(s)
+
+              {{ range .Alerts -}}
+              Alert:     {{ .Labels.alertname }}
+              Severity:  {{ .Labels.severity }}
+              Namespace: {{ .Labels.namespace }}
+              Service:   {{ .Labels.job }}
+              Summary:   {{ .Annotations.summary }}
+              Details:   {{ .Annotations.description }}
+              Started:   {{ .StartsAt }}
+              {{ if ne .Status "firing" }}Ended:     {{ .EndsAt }}
+              {{ end }}
+              Graph:     {{ .GeneratorURL }}
+
+              {{ end }}
+
+# ---------------------------------------------------------------------------
+# Grafana
+# ---------------------------------------------------------------------------
+grafana:
+  # task007: persistence on ebs-sc, 1Gi.
+  persistence:
+    enabled: true
+    type: pvc
+    storageClassName: ebs-sc
+    accessModes: ["ReadWriteOnce"]
+    size: 1Gi
+
+  # The chart's default admin password is the well-known "prom-operator", and
+  # this Grafana is on the public internet. bootstrap.sh creates this Secret
+  # (once) with a generated password and prints it.
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+
+  grafana.ini:
+    server:
+      domain: grafana.__DOMAIN_ROOT__
+      root_url: "https://grafana.__DOMAIN_ROOT__/"
+      # The ALB terminates TLS, so Grafana itself speaks HTTP and must be told
+      # the public scheme — otherwise generated links and the OAuth-style
+      # redirects come out as http:// and get bounced by the 80->443 listener.
+      enforce_domain: false
+
+  # Community dashboards fetched from grafana.com at pod start.
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: community
+          orgId: 1
+          folder: Community
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/community
+
+  dashboards:
+    community:
+      # task007: "NGINX Ingress Controller" — request rate, latency and response
+      # codes per Ingress host, i.e. one page showing every request entering the
+      # cluster. Fed by controller.metrics in the ingress-nginx values.
+      nginx-ingress:
+        gnetId: 9614
+        revision: 1
+        datasource: Prometheus
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Components trimmed for a small cluster
+# ---------------------------------------------------------------------------
+# A kubeadm cluster runs the scheduler and controller-manager bound to
+# 127.0.0.1, and etcd/kube-proxy metrics likewise are not reachable from a pod.
+# Leaving these enabled produces four permanently-DOWN targets in the Prometheus
+# UI and a stream of "TargetDown" alerts — noise that trains you to ignore the
+# alert list, which is worse than not monitoring them at all.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      memory: 128Mi

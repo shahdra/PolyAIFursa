@@ -1,14 +1,16 @@
+# Ingress objects routing dev traffic from the ALB/ingress-nginx to the
+# frontend and agent Services. See infra/k8s/dev/ingress/ingress.yaml.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: prometheus-dev
+  name: ingress-dev
   namespace: argocd
 spec:
   project: default
   source:
     repoURL: https://github.com/shahdra/PolyAIFursa
     targetRevision: dev
-    path: infra/k8s/dev/prometheus
+    path: infra/k8s/dev/ingress
   destination:
     server: https://kubernetes.default.svc
     namespace: dev

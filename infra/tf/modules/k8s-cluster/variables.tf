@@ -84,3 +84,12 @@ variable "worker_max_size" {
   type        = number
   default     = 3 # required by task006
 }
+
+variable "alerts_sns_topic_arn" {
+  description = <<-EOT
+    SNS topic Alertmanager publishes to. The worker role gets sns:Publish on it
+    (and nothing else), so the Alertmanager pod can authenticate through the
+    node's instance profile instead of a static access key in a Secret.
+  EOT
+  type        = string
+}

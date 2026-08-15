@@ -1,0 +1,62 @@
+# ServiceMonitors — how the kube-prometheus-stack Prometheus finds OUR services.
+#
+# In the previous task, scrape targets were a static list in a Prometheus
+# ConfigMap. With the Prometheus Operator they become Kubernetes objects: the
+# operator watches ServiceMonitor CRs, generates the scrape config, and reloads
+# Prometheus. Adding a service is now a commit ArgoCD syncs, not a ConfigMap
+# edit plus a manual restart.
+#
+# ── How a ServiceMonitor resolves to targets ────────────────────────────────
+#   namespaceSelector  -> which namespaces to look in            (dev)
+#   selector           -> which Services in them, BY LABEL       (app=agent)
+#   endpoints[].port   -> which named port on that Service       (http)
+# The operator then scrapes every POD backing that Service — so an HPA scaling
+# the agent to 3 replicas produces 3 targets with no config change.
+#
+# Verify in the Prometheus UI (Status -> Targets) that these show as UP:
+#   serviceMonitor/dev/agent/0   and   serviceMonitor/dev/yolo/0
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agent
+  namespace: dev
+  labels:
+    app: agent
+    # The chart's Prometheus normally only selects ServiceMonitors labelled
+    # `release: kube-prometheus-stack`. infra/k8s/monitoring/values.yaml sets
+    # serviceMonitorSelectorNilUsesHelmValues=false, which widens that to every
+    # ServiceMonitor in the cluster — this label is kept anyway so the object is
+    # still selected if that value is ever tightened.
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [dev]
+  selector:
+    matchLabels:
+      app: agent
+  endpoints:
+    - port: http # the named port on agent-service (8000)
+      path: /metrics # exposed by prometheus-fastapi-instrumentator
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: yolo
+  namespace: dev
+  labels:
+    app: yolo
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames: [dev]
+  selector:
+    matchLabels:
+      app: yolo
+  endpoints:
+    - port: http # the named port on yolo-service (8080)
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

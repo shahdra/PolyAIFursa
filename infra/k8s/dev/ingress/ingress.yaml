@@ -1,0 +1,55 @@
+# Public routing for the DEV environment.
+#
+#   https://dev.shahdra.fursa.click/       -> frontend-service:3000
+#   https://dev.shahdra.fursa.click/chat   -> agent-service:8000
+#
+# ── Why frontend and agent share ONE hostname ───────────────────────────────
+# The browser calls the agent directly (see services/frontend/lib/api.ts), and
+# that code resolves the agent's base URL from the page it was served on: when
+# there is no explicit port — i.e. we are behind a proxy on 443 — it assumes
+# SAME ORIGIN. Putting the agent on its own hostname would mean editing the
+# frontend and adding a CORS origin; putting it on a path under the same host
+# means the existing image works unchanged and there is no cross-origin request
+# at all.
+#
+# ── Why there is no `tls:` block ────────────────────────────────────────────
+# TLS is terminated at the ALB with the ACM certificate (infra/tf/modules/
+# ingress). nginx only ever sees plain HTTP from the load balancer, so adding a
+# tls section here would make it serve its own self-signed cert on a port the
+# ALB never connects to — and would switch on nginx's automatic HTTP->HTTPS
+# redirect, which, since every request already arrives as HTTP, becomes a
+# redirect loop.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: polyai
+  namespace: dev
+  annotations:
+    # Uploaded images are posted as base64 inside the JSON body; nginx's 1m
+    # default turns a photo into a 413.
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+    # An agent turn waits on an LLM plus YOLO. The 60s default cuts it off.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: dev.shahdra.fursa.click
+      http:
+        paths:
+          # MOST SPECIFIC FIRST. ingress-nginx sorts locations by path length so
+          # ordering here is not strictly load-bearing, but reading it top-down
+          # should match how it resolves.
+          - path: /chat
+            pathType: Prefix
+            backend:
+              service:
+                name: agent-service
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 3000

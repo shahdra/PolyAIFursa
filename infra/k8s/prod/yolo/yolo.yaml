@@ -71,7 +71,10 @@ spec:
   selector:
     app: yolo
   ports:
-    - port: 8080
+    # Named so the ServiceMonitor in ../monitoring/ can select this port
+    # by name rather than by number.
+    - name: http
+      port: 8080
       targetPort: 8080
 ---
 apiVersion: autoscaling/v2

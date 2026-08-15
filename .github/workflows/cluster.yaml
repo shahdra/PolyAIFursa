@@ -54,6 +54,11 @@ jobs:
       control_plane_ip: ${{ steps.tf_out.outputs.control_plane_ip }}
       cluster_name: ${{ steps.tf_out.outputs.cluster_name }}
       worker_asg_name: ${{ steps.tf_out.outputs.worker_asg_name }}
+      # task007: the bootstrap job renders these into the kube-prometheus-stack
+      # values and the ingress-nginx install.
+      domain_root: ${{ steps.tf_out.outputs.domain_root }}
+      alerts_sns_topic_arn: ${{ steps.tf_out.outputs.alerts_sns_topic_arn }}
+      alb_dns_name: ${{ steps.tf_out.outputs.alb_dns_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -99,6 +104,9 @@ jobs:
             echo "control_plane_ip=$(terraform output -raw control_plane_public_ip)"
             echo "cluster_name=$(terraform output -raw cluster_name)"
             echo "worker_asg_name=$(terraform output -raw worker_asg_name)"
+            echo "domain_root=$(terraform output -raw domain_root)"
+            echo "alerts_sns_topic_arn=$(terraform output -raw alerts_sns_topic_arn)"
+            echo "alb_dns_name=$(terraform output -raw alb_dns_name)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Summary
@@ -113,6 +121,12 @@ jobs:
             echo "| Cluster | \`$(terraform output -raw cluster_name)\` |"
             echo "| Control plane | \`$(terraform output -raw control_plane_public_ip)\` |"
             echo "| Worker ASG | \`$(terraform output -raw worker_asg_name)\` |"
+            echo "| ALB | \`$(terraform output -raw alb_dns_name)\` |"
+            echo "| Domain | \`$(terraform output -raw domain_root)\` |"
+            echo "| Alerts topic | \`$(terraform output -raw alerts_sns_topic_arn)\` |"
+            echo
+            echo "#### Public URLs"
+            terraform output -json urls | jq -r 'to_entries[] | "- \(.key): \(.value)"'
           } >> "$GITHUB_STEP_SUMMARY"
 
   bootstrap:
@@ -180,9 +194,17 @@ jobs:
         # app-of-apps-dev.yaml pins targetRevision: dev and app-of-apps-prod.yaml
         # pins targetRevision: main, so the child Applications always track the
         # right branch regardless of what was cloned here.
+        #
+        # DOMAIN_ROOT and ALERTS_SNS_TOPIC_ARN come from Terraform outputs. The
+        # script can derive both from the instance's own tags, but passing them
+        # explicitly means CI fails loudly on a mismatch instead of quietly
+        # configuring Alertmanager against a topic that does not exist.
         run: |
           ssh -o BatchMode=yes "ubuntu@${CP_IP}" \
-            "POLYAI_ENV_FILE=/tmp/polyai.env REPO_REF=dev bash -s" \
+            "POLYAI_ENV_FILE=/tmp/polyai.env REPO_REF=dev \
+             DOMAIN_ROOT='${{ needs.provision.outputs.domain_root }}' \
+             ALERTS_SNS_TOPIC_ARN='${{ needs.provision.outputs.alerts_sns_topic_arn }}' \
+             bash -s" \
             < infra/k8s/bootstrap.sh
 
       - name: Remove the staged credentials from the node
@@ -206,4 +228,12 @@ jobs:
             echo
             echo "Prod Applications are \`OutOfSync\` by design - they are manual-sync."
             echo "Promote with \`argocd app sync <service>-prod\`."
+            echo
+            echo "#### Ingress"
+            echo '```'
+            ssh -o BatchMode=yes "ubuntu@${CP_IP}" 'kubectl get ingress -A' 2>&1 || true
+            echo '```'
+            echo
+            echo "ALB targets take ~1 min to pass their first health check after"
+            echo "ingress-nginx starts; a 503 before then is expected."
           } >> "$GITHUB_STEP_SUMMARY"
